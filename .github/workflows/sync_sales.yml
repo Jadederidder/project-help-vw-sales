@@ -1,0 +1,35 @@
+name: Sync VW Audi Sales to Google Sheets
+
+on:
+  schedule:
+    - cron: "0 15 * * 1"
+
+  workflow_dispatch:
+
+jobs:
+  sync-sales:
+    name: Sync Sales to Google Sheets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync sales to Google Sheets
+        env:
+          SFTP_PASSWORD:              ${{ secrets.SFTP_PASSWORD }}
+          GOOGLE_SHEETS_CREDENTIALS:  ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:               ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:             ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:            ${{ secrets.EMAIL_RECIPIENT }}
+        run: python scripts/sync_sales_to_sheets.py
