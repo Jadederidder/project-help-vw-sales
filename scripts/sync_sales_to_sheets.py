@@ -2,10 +2,10 @@
 # ============================================================
 # scripts/sync_sales_to_sheets.py
 # Runs every Monday at 5pm
-# 1. Connects to SFTP and downloads latest VW_Audi EOD file
-# 2. Reads all rows from the file
-# 3. Compares against existing rows in Google Sheet SALES tab
-# 4. Appends only NEW rows (based on Policy Number)
+# 1. Connects to SFTP, downloads latest VW_Audi EOD file
+# 2. Filters rows from last 14 days only
+# 3. Deduplicates against existing sheet data by WesBank account number
+# 4. Appends only NEW rows to Google Sheet SALES tab
 # 5. Emails confirmation report
 # ============================================================
 
@@ -15,7 +15,7 @@ import logging
 import smtplib
 import io
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -44,17 +44,49 @@ EMAIL_SENDER    = os.environ.get("EMAIL_SENDER", "")
 EMAIL_PASSWORD  = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", "")
 
+LOOKBACK_DAYS = 14
+
+# Google Sheet column order — must match exactly
 SHEET_HEADERS = [
-    "call_date", "status", "user", "full_name", "brand", "phone_number",
-    "title", "first_name", "middle_initial", "last_name",
-    "address1", "address2", "address3", "city", "state", "province",
-    "postal_code", "alt_phone", "email", "lead_id", "status_name",
-    "account number", "CUSTOMER_NUMBER", "CUST_TYPE_CODE",
-    "IDENTITY_OR_REG_NUM", "BANK_NAME", "BANK_ACC_NUM", "BANK_BRANCH_CODE",
-    "VEHICLE_ID_NUM", "REGISTRATION_NUM", "CHASSIS_NUM",
-    "ASSET_SHORT_DESCRIPTION", "MM_MAKE_DESCRIPTION", "MM_MODEL_DESCRIPTION",
-    "DATE_FIRST_LICENSED", "OPEN_DATE", "DATE_EXPIRY",
-    "CUST_TYPE_DESC", "snapshot_date"
+    "call_date",        # A - Created Time
+    "status",           # B - BLANK
+    "user",             # C - BLANK
+    "full_name",        # D - FirstName + Surname
+    "brand",            # E - Manufacturer (VOLKSWAGEN/AUDI etc)
+    "phone_number",     # F - Mobile Number
+    "title",            # G - Title
+    "first_name",       # H - FirstName
+    "middle_initial",   # I - BLANK
+    "last_name",        # J - Surname
+    "address1",         # K - Physical Line1
+    "address2",         # L - Physical Line2
+    "address3",         # M - Physical Suburb
+    "city",             # N - Physical City
+    "state",            # O - BLANK
+    "province",         # P - Physical Province
+    "postal_code",      # Q - Physical Post Code
+    "alt_phone",        # R - BLANK
+    "email",            # S - Email Address
+    "lead_id",          # T - VICI Lead ID
+    "status_name",      # U - "SALE Premium Help" (hardcoded)
+    "account number",   # V - WesBank Account Number (starts with 87)
+    "CUSTOMER_NUMBER",  # W - Customer Number
+    "CUST_TYPE_CODE",   # X - CUST_TYPE_CODE
+    "IDENTITY_OR_REG_NUM", # Y - ID Number
+    "BANK_NAME",        # Z - Bank
+    "BANK_ACC_NUM",     # AA - Bank Account Number
+    "BANK_BRANCH_CODE", # AB - Branch Code
+    "VEHICLE_ID_NUM",   # AC - VEHICLE_ID_NUM
+    "REGISTRATION_NUM", # AD - REGISTRATION_NUM
+    "CHASSIS_NUM",      # AE - CHASSIS_NUM
+    "ASSET_SHORT_DESCRIPTION", # AF
+    "MM_MAKE_DESCRIPTION",     # AG - Manufacturer
+    "MM_MODEL_DESCRIPTION",    # AH - Model
+    "DATE_FIRST_LICENSED",     # AI - Date First Licensed
+    "OPEN_DATE",               # AJ - Open Date
+    "DATE_EXPIRY",             # AK - Expiry Date
+    "CUST_TYPE_DESC",          # AL - CUST_TYPE_DESC
+    "snapshot_date",           # AM - Snap Date
 ]
 
 
@@ -68,44 +100,14 @@ def get_sftp_client():
     return ssh, sftp
 
 
-def find_sales_folder(sftp):
-    """Find the VW & Audi Sales folder by listing directories."""
-    logger.info("Exploring SFTP structure...")
-
-    # List root
-    root_items = sftp.listdir(".")
-    logger.info("Root items: " + str(root_items))
-
-    # Try ProjectHelp folder
-    for root_item in root_items:
-        try:
-            sub_items = sftp.listdir(root_item)
-            logger.info(root_item + "/: " + str(sub_items))
-            for sub_item in sub_items:
-                path = root_item + "/" + sub_item
-                try:
-                    files = sftp.listdir(path)
-                    logger.info(path + "/: " + str(files))
-                    # Check if this folder has VW_Audi files
-                    xlsx_files = [f for f in files if f.endswith(".xlsx") and ("VW_Audi" in f or "VW Audi" in f)]
-                    if xlsx_files:
-                        logger.info("Found sales files in: " + path)
-                        return path, xlsx_files
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    return None, []
-
-
-def get_latest_file(sftp):
-    folder, files = find_sales_folder(sftp)
-    if not folder:
-        raise RuntimeError("Could not find VW_Audi sales folder on SFTP")
-
-    files.sort()
-    latest = files[-1]
+def find_latest_file(sftp):
+    """Find the latest VW_Audi EOD file in ProjectHelp/VW & Audi Sales."""
+    folder = "ProjectHelp/VW & Audi Sales"
+    files = sftp.listdir(folder)
+    xlsx_files = sorted([f for f in files if f.endswith(".xlsx") and "VW_Audi" in f])
+    if not xlsx_files:
+        raise RuntimeError("No VW_Audi files found in " + folder)
+    latest = xlsx_files[-1]
     logger.info("Latest file: " + latest)
     return folder, latest
 
@@ -119,63 +121,141 @@ def download_file(sftp, folder, filename):
     return buf
 
 
-def parse_sftp_file(buf):
+def parse_and_map(buf):
+    """Parse SFTP file and map to Google Sheet columns."""
     df = pd.read_excel(buf)
-    logger.info("SFTP file rows: " + str(len(df)))
-    return df
-
-
-def map_to_sheet_columns(df):
-    col_map = {
-        "Created Time (VW/Audi Campaign 1)": "call_date",
-        "Stage": "status",
-        "Created By (VW/Audi Campaign 1)": "user",
-        "FirstName": "first_name",
-        "Surname": "last_name",
-        "Title (VW/Audi Campaign 1)": "title",
-        "VW/Audi Product": "brand",
-        "Mobile Number (VW/Audi Campaign 1)": "phone_number",
-        "Email Address (VW/Audi Campaign 1)": "email",
-        "Physical Line1": "address1",
-        "Physical Line2": "address2",
-        "Physical Suburb": "address3",
-        "Physical City": "city",
-        "Physical Province": "province",
-        "Physical Post Code": "postal_code",
-        "VICI Lead ID": "lead_id",
-        "Policy Number": "account number",
-        "Customer Number": "CUSTOMER_NUMBER",
-        "CUST_TYPE_CODE": "CUST_TYPE_CODE",
-        "ID Number": "IDENTITY_OR_REG_NUM",
-        "Bank": "BANK_NAME",
-        "Bank Account Number (VW/Audi)": "BANK_ACC_NUM",
-        "Branch Code (VW/Audi Campaign 1)": "BANK_BRANCH_CODE",
-        "VEHICLE_ID_NUM": "VEHICLE_ID_NUM",
-        "REGISTRATION_NUM": "REGISTRATION_NUM",
-        "CHASSIS_NUM": "CHASSIS_NUM",
-        "ASSET_SHORT_DESCRIPTION": "ASSET_SHORT_DESCRIPTION",
-        "Manufacturer": "MM_MAKE_DESCRIPTION",
-        "Model": "MM_MODEL_DESCRIPTION",
-        "Date First Licensed": "DATE_FIRST_LICENSED",
-        "Open Date": "OPEN_DATE",
-        "Expiry Date": "DATE_EXPIRY",
-        "CUST_TYPE_DESC": "CUST_TYPE_DESC",
-        "Snap Date": "snapshot_date",
-    }
+    logger.info("Total rows in file: " + str(len(df)))
 
     mapped = pd.DataFrame()
-    for src_col, dst_col in col_map.items():
-        if src_col in df.columns:
-            mapped[dst_col] = df[src_col]
 
-    if "first_name" in mapped.columns and "last_name" in mapped.columns:
-        mapped["full_name"] = (
-            mapped["first_name"].fillna("") + " " + mapped["last_name"].fillna("")
-        ).str.strip()
+    # A: call_date — Created Time
+    mapped["call_date"] = pd.to_datetime(
+        df.get("Created Time (VW/Audi Campaign 1)"), errors="coerce"
+    )
 
-    for h in SHEET_HEADERS:
-        if h not in mapped.columns:
-            mapped[h] = ""
+    # B: status — BLANK
+    mapped["status"] = ""
+
+    # C: user — BLANK
+    mapped["user"] = ""
+
+    # D: full_name — FirstName + Surname
+    mapped["full_name"] = (
+        df.get("FirstName", "").fillna("").astype(str) + " " +
+        df.get("Surname", "").fillna("").astype(str)
+    ).str.strip()
+
+    # E: brand — Manufacturer (VOLKSWAGEN/AUDI/CHERY/SUZUKI etc)
+    mapped["brand"] = df.get("Manufacturer", "").fillna("").astype(str).str.upper()
+
+    # F: phone_number
+    mapped["phone_number"] = df.get("Mobile Number (VW/Audi Campaign 1)", "").fillna("").astype(str)
+
+    # G: title
+    mapped["title"] = df.get("Title (VW/Audi Campaign 1)", "").fillna("").astype(str)
+
+    # H: first_name
+    mapped["first_name"] = df.get("FirstName", "").fillna("").astype(str)
+
+    # I: middle_initial — BLANK
+    mapped["middle_initial"] = ""
+
+    # J: last_name
+    mapped["last_name"] = df.get("Surname", "").fillna("").astype(str)
+
+    # K: address1
+    mapped["address1"] = df.get("Physical Line1", "").fillna("").astype(str)
+
+    # L: address2
+    mapped["address2"] = df.get("Physical Line2", "").fillna("").astype(str)
+
+    # M: address3 — suburb
+    mapped["address3"] = df.get("Physical Suburb", "").fillna("").astype(str)
+
+    # N: city
+    mapped["city"] = df.get("Physical City", "").fillna("").astype(str)
+
+    # O: state — BLANK
+    mapped["state"] = ""
+
+    # P: province
+    mapped["province"] = df.get("Physical Province", "").fillna("").astype(str)
+
+    # Q: postal_code
+    mapped["postal_code"] = df.get("Physical Post Code", "").fillna("").astype(str)
+
+    # R: alt_phone — BLANK
+    mapped["alt_phone"] = ""
+
+    # S: email
+    mapped["email"] = df.get("Email Address (VW/Audi Campaign 1)", "").fillna("").astype(str)
+
+    # T: lead_id — VICI Lead ID
+    mapped["lead_id"] = df.get("VICI Lead ID", "").fillna("").astype(str)
+
+    # U: status_name — hardcoded
+    mapped["status_name"] = "SALE Premium Help"
+
+    # V: account number — WesBank Account Number (starts with 87) — MOST IMPORTANT
+    mapped["account number"] = df.get("WesBank Account Number", "").fillna("").astype(str).str.strip()
+
+    # W: CUSTOMER_NUMBER
+    mapped["CUSTOMER_NUMBER"] = df.get("Customer Number", "").fillna("").astype(str)
+
+    # X: CUST_TYPE_CODE
+    mapped["CUST_TYPE_CODE"] = df.get("CUST_TYPE_CODE", "").fillna("").astype(str)
+
+    # Y: IDENTITY_OR_REG_NUM
+    mapped["IDENTITY_OR_REG_NUM"] = df.get("ID Number", "").fillna("").astype(str)
+
+    # Z: BANK_NAME
+    mapped["BANK_NAME"] = df.get("Bank", "").fillna("").astype(str)
+
+    # AA: BANK_ACC_NUM
+    mapped["BANK_ACC_NUM"] = df.get("Bank Account Number (VW/Audi)", "").fillna("").astype(str)
+
+    # AB: BANK_BRANCH_CODE
+    mapped["BANK_BRANCH_CODE"] = df.get("Branch Code (VW/Audi Campaign 1)", "").fillna("").astype(str)
+
+    # AC: VEHICLE_ID_NUM
+    mapped["VEHICLE_ID_NUM"] = df.get("VEHICLE_ID_NUM", "").fillna("").astype(str)
+
+    # AD: REGISTRATION_NUM
+    mapped["REGISTRATION_NUM"] = df.get("REGISTRATION_NUM", "").fillna("").astype(str)
+
+    # AE: CHASSIS_NUM
+    mapped["CHASSIS_NUM"] = df.get("CHASSIS_NUM", "").fillna("").astype(str)
+
+    # AF: ASSET_SHORT_DESCRIPTION
+    mapped["ASSET_SHORT_DESCRIPTION"] = df.get("ASSET_SHORT_DESCRIPTION", "").fillna("").astype(str)
+
+    # AG: MM_MAKE_DESCRIPTION — Manufacturer
+    mapped["MM_MAKE_DESCRIPTION"] = df.get("Manufacturer", "").fillna("").astype(str)
+
+    # AH: MM_MODEL_DESCRIPTION — Model
+    mapped["MM_MODEL_DESCRIPTION"] = df.get("Model", "").fillna("").astype(str)
+
+    # AI: DATE_FIRST_LICENSED
+    mapped["DATE_FIRST_LICENSED"] = df.get("Date First Licensed", "").fillna("").astype(str)
+
+    # AJ: OPEN_DATE
+    mapped["OPEN_DATE"] = df.get("Open Date", "").fillna("").astype(str)
+
+    # AK: DATE_EXPIRY
+    mapped["DATE_EXPIRY"] = df.get("Expiry Date", "").fillna("").astype(str)
+
+    # AL: CUST_TYPE_DESC
+    mapped["CUST_TYPE_DESC"] = df.get("CUST_TYPE_DESC", "").fillna("").astype(str)
+
+    # AM: snapshot_date
+    mapped["snapshot_date"] = df.get("Snap Date", "").fillna("").astype(str)
+
+    # Filter to last 14 days only
+    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+    mapped["call_date"] = pd.to_datetime(mapped["call_date"], utc=True, errors="coerce")
+    before_filter = len(mapped)
+    mapped = mapped[mapped["call_date"] >= cutoff].copy()
+    logger.info("Rows in last " + str(LOOKBACK_DAYS) + " days: " + str(len(mapped)) + " (filtered from " + str(before_filter) + ")")
 
     return mapped[SHEET_HEADERS]
 
@@ -183,46 +263,39 @@ def map_to_sheet_columns(df):
 def get_sheets_service():
     creds_json = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
     if not creds_json:
-        raise ValueError("GOOGLE_SHEETS_CREDENTIALS secret not set")
+        raise ValueError("GOOGLE_SHEETS_CREDENTIALS not set")
     creds_dict = json.loads(creds_json)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SHEET_SCOPES)
     return build("sheets", "v4", credentials=creds)
 
 
-def get_existing_policy_numbers(service):
+def get_existing_accounts(service):
+    """Get all existing WesBank account numbers from column V."""
     result = service.spreadsheets().values().get(
         spreadsheetId=SHEET_ID,
-        range=SHEET_TAB + "!A:AO"
+        range=SHEET_TAB + "!V:V"
     ).execute()
 
     values = result.get("values", [])
     if not values or len(values) < 2:
-        logger.info("Sheet is empty or has only headers")
-        return set(), 0
+        return set()
 
-    headers = values[0]
-    logger.info("Sheet has " + str(len(values) - 1) + " existing rows")
+    existing = set()
+    for row in values[1:]:  # skip header
+        if row and row[0]:
+            existing.add(str(row[0]).strip())
 
-    try:
-        acct_col = headers.index("account number")
-        existing = set()
-        for row in values[1:]:
-            if len(row) > acct_col and row[acct_col]:
-                existing.add(str(row[acct_col]).strip())
-        logger.info("Existing policy numbers: " + str(len(existing)))
-        return existing, len(values) - 1
-    except ValueError:
-        logger.warning("account number column not found — will add all rows")
-        return set(), 0
+    logger.info("Existing account numbers in sheet: " + str(len(existing)))
+    return existing
 
 
-def append_new_rows(service, new_rows_df):
-    if new_rows_df.empty:
+def append_new_rows(service, df):
+    if df.empty:
         logger.info("No new rows to append")
         return 0
 
     rows = []
-    for _, row in new_rows_df.iterrows():
+    for _, row in df.iterrows():
         formatted = []
         for val in row:
             try:
@@ -234,7 +307,8 @@ def append_new_rows(service, new_rows_df):
             if hasattr(val, 'strftime'):
                 formatted.append(val.strftime("%Y-%m-%d %H:%M:%S"))
             else:
-                formatted.append(str(val) if val is not None else "")
+                s = str(val) if val is not None else ""
+                formatted.append("" if s in ["nan", "NaT", "None"] else s)
         rows.append(formatted)
 
     body = {"values": rows}
@@ -250,9 +324,9 @@ def append_new_rows(service, new_rows_df):
     return len(rows)
 
 
-def send_email(new_count, total_count, filename):
+def send_email(new_count, total_file_rows, filtered_rows, filename):
     if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
-        logger.warning("Email credentials not set")
+        logger.warning("Email credentials not set — skipping email")
         return
 
     msg = MIMEMultipart()
@@ -265,7 +339,8 @@ def send_email(new_count, total_count, filename):
     body += "<h2 style='color:white;margin:0;'>VW/Audi Sales Dashboard Updated</h2></div>"
     body += "<div style='padding:20px;background:#EBF3FB;'><table width='100%' cellpadding='8'>"
     body += "<tr><td>Source file</td><td align='right'><b>" + filename + "</b></td></tr>"
-    body += "<tr><td>Total rows in file</td><td align='right'><b>" + str(total_count) + "</b></td></tr>"
+    body += "<tr><td>Total rows in file</td><td align='right'><b>" + str(total_file_rows) + "</b></td></tr>"
+    body += "<tr><td>Rows in last 14 days</td><td align='right'><b>" + str(filtered_rows) + "</b></td></tr>"
     body += "<tr><td>New rows added</td><td align='right'><b style='color:#375623;'>" + str(new_count) + "</b></td></tr>"
     body += "</table>"
     body += "<p style='font-size:12px;color:#595959;'><a href='https://docs.google.com/spreadsheets/d/" + SHEET_ID + "'>Open Google Sheet</a></p>"
@@ -284,31 +359,39 @@ def main():
     logger.info("=" * 60)
     logger.info("VW/AUDI SALES SYNC")
     logger.info("Date: " + run_date.strftime("%d %B %Y %H:%M"))
+    logger.info("Lookback: last " + str(LOOKBACK_DAYS) + " days")
     logger.info("=" * 60)
 
+    # Step 1: Download latest file from SFTP
     ssh, sftp = get_sftp_client()
     try:
-        folder, filename = get_latest_file(sftp)
+        folder, filename = find_latest_file(sftp)
         buf = download_file(sftp, folder, filename)
     finally:
         sftp.close()
         ssh.close()
 
-    df_raw = parse_sftp_file(buf)
-    df_mapped = map_to_sheet_columns(df_raw)
+    # Step 2: Parse and map columns, filter to last 14 days
+    df_mapped = parse_and_map(buf)
+    logger.info("Mapped rows after date filter: " + str(len(df_mapped)))
 
+    # Step 3: Get existing account numbers from sheet
     service = get_sheets_service()
-    existing_policies, existing_count = get_existing_policy_numbers(service)
+    existing_accounts = get_existing_accounts(service)
 
+    # Step 4: Filter to new rows only (dedupe by WesBank account number)
     df_new = df_mapped[
-        ~df_mapped["account number"].astype(str).str.strip().isin(existing_policies)
+        ~df_mapped["account number"].astype(str).str.strip().isin(existing_accounts)
     ].copy()
 
     logger.info("New rows to add: " + str(len(df_new)))
     logger.info("Already in sheet: " + str(len(df_mapped) - len(df_new)))
 
+    # Step 5: Append
     added = append_new_rows(service, df_new)
-    send_email(added, len(df_raw), filename)
+
+    # Step 6: Email
+    send_email(added, 0, len(df_mapped), filename)
 
     logger.info("=" * 60)
     logger.info("Done. Added " + str(added) + " new rows.")
