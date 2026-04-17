@@ -15,7 +15,6 @@ import logging
 import smtplib
 import io
 import json
-import tempfile
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -32,31 +31,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────
 SFTP_HOST     = "eu-west-1.sftpcloud.io"
 SFTP_PORT     = 22
 SFTP_USER     = "Projecthelp"
 SFTP_PASSWORD = os.environ.get("SFTP_PASSWORD", "")
-SFTP_PATH     = "/ProjectHelp/VW & Audi Sales"
 
 SHEET_ID      = "1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs"
 SHEET_TAB     = "SALES"
 SHEET_SCOPES  = ["https://www.googleapis.com/auth/spreadsheets"]
 
-EMAIL_SENDER   = os.environ.get("EMAIL_SENDER", "")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+EMAIL_SENDER    = os.environ.get("EMAIL_SENDER", "")
+EMAIL_PASSWORD  = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", "")
-
-# Columns from SFTP file → Google Sheet column mapping
-# Google Sheet headers:
-# call_date, status, user, full_name, brand, phone_number, title,
-# first_name, middle_initial, last_name, address1, address2, address3,
-# city, state, province, postal_code, alt_phone, email, lead_id,
-# status_name, account number, CUSTOMER_NUMBER, CUST_TYPE_CODE,
-# IDENTITY_OR_REG_NUM, BANK_NAME, BANK_ACC_NUM, BANK_BRANCH_CODE,
-# VEHICLE_ID_NUM, REGISTRATION_NUM, CHASSIS_NUM, ASSET_SHORT_DESCRIPTION,
-# MM_MAKE_DESCRIPTION, MM_MODEL_DESCRIPTION, DATE_FIRST_LICENSED,
-# OPEN_DATE, DATE_EXPIRY, CUST_TYPE_DESC, snapshot_date
 
 SHEET_HEADERS = [
     "call_date", "status", "user", "full_name", "brand", "phone_number",
@@ -82,18 +68,50 @@ def get_sftp_client():
     return ssh, sftp
 
 
+def find_sales_folder(sftp):
+    """Find the VW & Audi Sales folder by listing directories."""
+    logger.info("Exploring SFTP structure...")
+
+    # List root
+    root_items = sftp.listdir(".")
+    logger.info("Root items: " + str(root_items))
+
+    # Try ProjectHelp folder
+    for root_item in root_items:
+        try:
+            sub_items = sftp.listdir(root_item)
+            logger.info(root_item + "/: " + str(sub_items))
+            for sub_item in sub_items:
+                path = root_item + "/" + sub_item
+                try:
+                    files = sftp.listdir(path)
+                    logger.info(path + "/: " + str(files))
+                    # Check if this folder has VW_Audi files
+                    xlsx_files = [f for f in files if f.endswith(".xlsx") and ("VW_Audi" in f or "VW Audi" in f)]
+                    if xlsx_files:
+                        logger.info("Found sales files in: " + path)
+                        return path, xlsx_files
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    return None, []
+
+
 def get_latest_file(sftp):
-    logger.info("Listing files in: " + SFTP_PATH)
-    files = sftp.listdir(SFTP_PATH)
-    excel_files = [f for f in files if f.endswith(".xlsx") and "VW_Audi" in f]
-    excel_files.sort()
-    latest = excel_files[-1]
+    folder, files = find_sales_folder(sftp)
+    if not folder:
+        raise RuntimeError("Could not find VW_Audi sales folder on SFTP")
+
+    files.sort()
+    latest = files[-1]
     logger.info("Latest file: " + latest)
-    return latest
+    return folder, latest
 
 
-def download_file(sftp, filename):
-    remote_path = SFTP_PATH + "/" + filename
+def download_file(sftp, folder, filename):
+    remote_path = folder + "/" + filename
     logger.info("Downloading: " + remote_path)
     buf = io.BytesIO()
     sftp.getfo(remote_path, buf)
@@ -104,12 +122,10 @@ def download_file(sftp, filename):
 def parse_sftp_file(buf):
     df = pd.read_excel(buf)
     logger.info("SFTP file rows: " + str(len(df)))
-    logger.info("Columns: " + str(df.columns.tolist()[:5]))
     return df
 
 
 def map_to_sheet_columns(df):
-    """Map SFTP file columns to Google Sheet columns."""
     col_map = {
         "Created Time (VW/Audi Campaign 1)": "call_date",
         "Stage": "status",
@@ -145,7 +161,6 @@ def map_to_sheet_columns(df):
         "Expiry Date": "DATE_EXPIRY",
         "CUST_TYPE_DESC": "CUST_TYPE_DESC",
         "Snap Date": "snapshot_date",
-        "WesBank Account Number": "lead_id",
     }
 
     mapped = pd.DataFrame()
@@ -153,13 +168,11 @@ def map_to_sheet_columns(df):
         if src_col in df.columns:
             mapped[dst_col] = df[src_col]
 
-    # full_name
     if "first_name" in mapped.columns and "last_name" in mapped.columns:
         mapped["full_name"] = (
             mapped["first_name"].fillna("") + " " + mapped["last_name"].fillna("")
         ).str.strip()
 
-    # Ensure all sheet headers exist
     for h in SHEET_HEADERS:
         if h not in mapped.columns:
             mapped[h] = ""
@@ -171,15 +184,12 @@ def get_sheets_service():
     creds_json = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
     if not creds_json:
         raise ValueError("GOOGLE_SHEETS_CREDENTIALS secret not set")
-
     creds_dict = json.loads(creds_json)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SHEET_SCOPES)
-    service = build("sheets", "v4", credentials=creds)
-    return service
+    return build("sheets", "v4", credentials=creds)
 
 
 def get_existing_policy_numbers(service):
-    """Get all existing policy numbers (account number column) from the sheet."""
     result = service.spreadsheets().values().get(
         spreadsheetId=SHEET_ID,
         range=SHEET_TAB + "!A:AO"
@@ -188,7 +198,7 @@ def get_existing_policy_numbers(service):
     values = result.get("values", [])
     if not values or len(values) < 2:
         logger.info("Sheet is empty or has only headers")
-        return set(), len(values)
+        return set(), 0
 
     headers = values[0]
     logger.info("Sheet has " + str(len(values) - 1) + " existing rows")
@@ -200,10 +210,10 @@ def get_existing_policy_numbers(service):
             if len(row) > acct_col and row[acct_col]:
                 existing.add(str(row[acct_col]).strip())
         logger.info("Existing policy numbers: " + str(len(existing)))
-        return existing, len(values)
+        return existing, len(values) - 1
     except ValueError:
-        logger.warning("account number column not found in sheet headers")
-        return set(), len(values)
+        logger.warning("account number column not found — will add all rows")
+        return set(), 0
 
 
 def append_new_rows(service, new_rows_df):
@@ -211,14 +221,17 @@ def append_new_rows(service, new_rows_df):
         logger.info("No new rows to append")
         return 0
 
-    # Convert to list of lists, handling NaN and dates
     rows = []
     for _, row in new_rows_df.iterrows():
         formatted = []
         for val in row:
-            if pd.isna(val) if not isinstance(val, str) else False:
-                formatted.append("")
-            elif hasattr(val, 'strftime'):
+            try:
+                if pd.isna(val):
+                    formatted.append("")
+                    continue
+            except (TypeError, ValueError):
+                pass
+            if hasattr(val, 'strftime'):
                 formatted.append(val.strftime("%Y-%m-%d %H:%M:%S"))
             else:
                 formatted.append(str(val) if val is not None else "")
@@ -233,7 +246,7 @@ def append_new_rows(service, new_rows_df):
         body=body
     ).execute()
 
-    logger.info("Appended " + str(len(rows)) + " new rows to sheet")
+    logger.info("Appended " + str(len(rows)) + " new rows")
     return len(rows)
 
 
@@ -253,10 +266,9 @@ def send_email(new_count, total_count, filename):
     body += "<div style='padding:20px;background:#EBF3FB;'><table width='100%' cellpadding='8'>"
     body += "<tr><td>Source file</td><td align='right'><b>" + filename + "</b></td></tr>"
     body += "<tr><td>Total rows in file</td><td align='right'><b>" + str(total_count) + "</b></td></tr>"
-    body += "<tr><td>New rows added to sheet</td><td align='right'><b style='color:#375623;'>" + str(new_count) + "</b></td></tr>"
+    body += "<tr><td>New rows added</td><td align='right'><b style='color:#375623;'>" + str(new_count) + "</b></td></tr>"
     body += "</table>"
-    body += "<p style='font-size:12px;color:#595959;'>View the dashboard: "
-    body += "<a href='https://docs.google.com/spreadsheets/d/" + SHEET_ID + "'>Open Google Sheet</a></p>"
+    body += "<p style='font-size:12px;color:#595959;'><a href='https://docs.google.com/spreadsheets/d/" + SHEET_ID + "'>Open Google Sheet</a></p>"
     body += "</div></body></html>"
 
     msg.attach(MIMEText(body, "html"))
@@ -274,27 +286,20 @@ def main():
     logger.info("Date: " + run_date.strftime("%d %B %Y %H:%M"))
     logger.info("=" * 60)
 
-    # Step 1: Download latest file from SFTP
     ssh, sftp = get_sftp_client()
     try:
-        filename = get_latest_file(sftp)
-        buf = download_file(sftp, filename)
+        folder, filename = get_latest_file(sftp)
+        buf = download_file(sftp, folder, filename)
     finally:
         sftp.close()
         ssh.close()
 
-    # Step 2: Parse file
     df_raw = parse_sftp_file(buf)
     df_mapped = map_to_sheet_columns(df_raw)
-    logger.info("Mapped rows: " + str(len(df_mapped)))
 
-    # Step 3: Connect to Google Sheets
     service = get_sheets_service()
+    existing_policies, existing_count = get_existing_policy_numbers(service)
 
-    # Step 4: Get existing policy numbers
-    existing_policies, existing_row_count = get_existing_policy_numbers(service)
-
-    # Step 5: Filter to new rows only
     df_new = df_mapped[
         ~df_mapped["account number"].astype(str).str.strip().isin(existing_policies)
     ].copy()
@@ -302,10 +307,7 @@ def main():
     logger.info("New rows to add: " + str(len(df_new)))
     logger.info("Already in sheet: " + str(len(df_mapped) - len(df_new)))
 
-    # Step 6: Append new rows
     added = append_new_rows(service, df_new)
-
-    # Step 7: Email confirmation
     send_email(added, len(df_raw), filename)
 
     logger.info("=" * 60)
