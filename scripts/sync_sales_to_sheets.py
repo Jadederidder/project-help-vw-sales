@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 SFTP_HOST     = "eu-west-1.sftpcloud.io"
 SFTP_PORT     = 22
-SFTP_USER     = "Projecthelp"
+SFTP_USER     = "projecthelp@projecthelp.co.za"
 SFTP_PASSWORD = os.environ.get("SFTP_PASSWORD", "")
 
 SHEET_ID      = "1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs"
