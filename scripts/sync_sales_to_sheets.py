@@ -197,7 +197,13 @@ def parse_and_map(buf):
     mapped["status_name"] = "SALE Premium Help"
 
     # V: account number — WesBank Account Number (starts with 87) — MOST IMPORTANT
-    mapped["account number"] = df.get("WesBank Account Number", "").fillna("").astype(str).str.strip()
+    def clean_account(val):
+        s = str(val).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s.strip()
+
+    mapped["account number"] = df.get("WesBank Account Number", "").fillna("").apply(clean_account)
 
     # W: CUSTOMER_NUMBER
     mapped["CUSTOMER_NUMBER"] = df.get("Customer Number", "").fillna("").astype(str)
@@ -283,9 +289,18 @@ def get_existing_accounts(service):
     existing = set()
     for row in values[1:]:  # skip header
         if row and row[0]:
-            existing.add(str(row[0]).strip())
+            val = str(row[0]).strip()
+            # Remove .0 suffix if present (Google Sheets stores numbers as floats)
+            if val.endswith(".0"):
+                val = val[:-2]
+            val = val.strip()
+            if val and val != "account number":
+                existing.add(val)
 
     logger.info("Existing account numbers in sheet: " + str(len(existing)))
+    if existing:
+        sample = list(existing)[:3]
+        logger.info("Sample existing accounts: " + str(sample))
     return existing
 
 
