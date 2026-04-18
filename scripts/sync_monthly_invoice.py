@@ -2,6 +2,8 @@
 import os
 import json
 import logging
+import smtplib
+from email.message import EmailMessage
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from google.oauth2.service_account import Credentials
@@ -89,6 +91,36 @@ def create_invoice_tab(service, tab_name, dash_row):
     logger.info(f"Formula written to '{tab_name}'!A2")
     return new_gid
 
+def send_notification(month_str, row, tab_name, tab_created, formulas_written):
+    sender   = os.environ.get("EMAIL_SENDER")
+    password = os.environ.get("EMAIL_PASSWORD")
+    recipient = os.environ.get("EMAIL_RECIPIENT", "jd@projecthelp.co.za")
+    if not sender or not password:
+        logger.warning("EMAIL_SENDER or EMAIL_PASSWORD not set — skipping notification")
+        return
+    formula_line  = f"  - 17 formulas written to DASHBOARD row {row}" if formulas_written else f"  - DASHBOARD row {row} already had data — formulas skipped"
+    tab_line      = f"  - Created new tab '{tab_name}'" if tab_created else f"  - Tab '{tab_name}' already existed — skipped"
+    body = (
+        f"Hi,\n\n"
+        f"The VW Monthly Invoice Sync ran successfully.\n\n"
+        f"Summary:\n"
+        f"  - Month processed : {month_str}\n"
+        f"{formula_line}\n"
+        f"{tab_line}\n"
+        f"  - Drilldown link updated in DASHBOARD col X row {row}\n\n"
+        f"Run date: {date.today()}\n\n"
+        f"— VW Sales Automation"
+    )
+    msg = EmailMessage()
+    msg["Subject"] = f"VW Invoice Sync — {month_str} completed"
+    msg["From"]    = sender
+    msg["To"]      = recipient
+    msg.set_content(body)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(sender, password)
+        smtp.send_message(msg)
+    logger.info(f"Notification sent → {recipient}")
+
 def write_drilldown(service, dash_gid, row, new_gid, tab_label):
     hyperlink = f'=HYPERLINK("#gid={new_gid}","🔍 SHEET {tab_label}")'
     service.spreadsheets().batchUpdate(spreadsheetId=SHEET_ID, body={"requests": [{"updateCells": {"range": {"sheetId": dash_gid,"startRowIndex": row-1,"endRowIndex": row,"startColumnIndex": 23,"endColumnIndex": 24},"rows": [{"values": [{"userEnteredValue": {"formulaValue": hyperlink}}]}],"fields": "userEnteredValue"}}]}).execute()
@@ -130,20 +162,25 @@ def main():
     ).execute()
     if existing.get("values"):
         logger.info(f"Row {row} already has data — skipping formula write")
+        formulas_written = False
     else:
         formulas = build_formulas(row)
         write_formulas(service, dash_gid, row, formulas)
+        formulas_written = True
 
     if get_sheet_id(service, tab_name):
         logger.warning(f"Tab '{tab_name}' already exists — skipping creation")
         new_gid = get_sheet_id(service, tab_name)
+        tab_created = False
     else:
         new_gid = create_invoice_tab(service, tab_name, row)
+        tab_created = True
 
     write_drilldown(service, dash_gid, row, new_gid, tab_label)
     logger.info("=" * 60)
     logger.info("DONE")
     logger.info("=" * 60)
+    send_notification(month_str, row, tab_name, tab_created, formulas_written)
 
 if __name__ == "__main__":
     main()
