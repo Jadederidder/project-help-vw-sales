@@ -395,54 +395,57 @@
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      position: relative;
       cursor: default;
     }
     .th-tip .tip-icon {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 14px;
-      height: 14px;
+      width: 15px;
+      height: 15px;
       border-radius: 50%;
-      background: rgba(255,255,255,0.25);
+      background: rgba(255,255,255,0.3);
+      border: 1px solid rgba(255,255,255,0.5);
       font-size: 9px;
       font-style: normal;
+      font-weight: 700;
       line-height: 1;
       flex-shrink: 0;
+      cursor: pointer;
+      transition: background 0.15s;
     }
-    .th-tip .tip-box {
-      visibility: hidden;
-      opacity: 0;
-      position: absolute;
-      bottom: calc(100% + 10px);
-      left: 50%;
-      transform: translateX(-50%);
-      width: 240px;
+    .th-tip .tip-icon:hover { background: rgba(255,255,255,0.55); }
+
+    /* Body-level floating tooltip — appended by JS, escapes overflow:hidden */
+    #floating-tip {
+      position: fixed;
+      z-index: 9998;
+      max-width: 260px;
       background: #0D1526;
-      color: rgba(255,255,255,0.88);
-      font-size: 11.5px;
+      color: rgba(255,255,255,0.9);
+      font-family: 'Inter', sans-serif;
+      font-size: 12.5px;
       font-weight: 400;
-      line-height: 1.5;
-      padding: 10px 12px;
-      border-radius: 8px;
+      line-height: 1.55;
+      padding: 11px 14px;
+      border-radius: 9px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.3);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.18s ease;
       letter-spacing: 0;
       text-transform: none;
-      pointer-events: none;
-      transition: opacity 0.18s ease;
-      z-index: 100;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
     }
-    .th-tip .tip-box::after {
+    #floating-tip.visible { opacity: 1; }
+    #floating-tip::after {
       content: '';
       position: absolute;
       top: 100%;
-      left: 50%;
+      left: var(--arrow-x, 50%);
       transform: translateX(-50%);
-      border: 6px solid transparent;
+      border: 7px solid transparent;
       border-top-color: #0D1526;
     }
-    .th-tip:hover .tip-box { visibility: visible; opacity: 1; }
 
     /* ── FOOTER ─────────────────────────────────────────────────── */
     .footer {
@@ -604,8 +607,8 @@
               <th>
                 <span class="th-tip">
                   VW Billing Lock
-                  <i class="tip-icon">i</i>
-                  <span class="tip-box">The locked commission amount for this invoice period — remains fixed even if policies cancel after the billing date.</span>
+                  <i class="tip-icon"
+                     data-tip="The locked commission amount for this invoice period — remains fixed even if policies cancel after the billing date.">i</i>
                 </span>
               </th>
             </tr>
@@ -917,6 +920,64 @@ function renderTable({ monthly }) {
 
   document.getElementById('tbl-body').innerHTML = html;
 }
+
+/* ================================================================
+   FLOATING TOOLTIP  (body-level, escapes overflow:hidden parents)
+   ================================================================ */
+(function () {
+  const tip = document.createElement('div');
+  tip.id = 'floating-tip';
+  document.body.appendChild(tip);
+
+  let hideTimer;
+
+  document.addEventListener('mouseover', e => {
+    const icon = e.target.closest('[data-tip]');
+    if (!icon) return;
+
+    clearTimeout(hideTimer);
+    tip.textContent = icon.dataset.tip;
+
+    const rect = icon.getBoundingClientRect();
+    tip.classList.remove('visible');
+    tip.style.opacity = '0';
+
+    // Position above the icon, centred
+    const tipW = 260;
+    const margin = 10;
+    let left = rect.left + rect.width / 2 - tipW / 2;
+    left = Math.max(margin, Math.min(left, window.innerWidth - tipW - margin));
+
+    tip.style.width  = tipW + 'px';
+    tip.style.left   = left + 'px';
+    tip.style.top    = '';
+    tip.style.bottom = '';
+
+    // Measure height after setting text
+    requestAnimationFrame(() => {
+      const tipH = tip.offsetHeight;
+      const spaceAbove = rect.top;
+
+      if (spaceAbove >= tipH + 12) {
+        tip.style.top = (rect.top - tipH - 10 + window.scrollY) + 'px';
+      } else {
+        tip.style.top = (rect.bottom + 10 + window.scrollY) + 'px';
+      }
+
+      // Arrow position relative to tip box
+      const arrowX = (rect.left + rect.width / 2) - left;
+      tip.style.setProperty('--arrow-x', arrowX + 'px');
+
+      tip.classList.add('visible');
+    });
+  });
+
+  document.addEventListener('mouseout', e => {
+    const icon = e.target.closest('[data-tip]');
+    if (!icon) return;
+    hideTimer = setTimeout(() => tip.classList.remove('visible'), 120);
+  });
+})();
 
 /* ================================================================
    INIT
