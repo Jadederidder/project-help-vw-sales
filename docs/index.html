@@ -449,7 +449,7 @@
   </div>
   <div class="hdr-divider"></div>
   <div class="hdr-meta">
-    Campaign period: <b>July 2024 – March 2025</b>
+    Campaign period: <b>August 2025 – April 2026</b>
     &nbsp;·&nbsp; 9 months tracked
     &nbsp;·&nbsp; Data source: <b>Google Sheets</b>
     &nbsp;·&nbsp; Synced weekly via GitHub Actions
@@ -512,7 +512,7 @@
         <div class="card-title">Monthly New Sales Growth</div>
         <div class="card-desc">Net subscriptions per month (bars) vs. cumulative total (line)</div>
       </div>
-      <div class="card-badge">Jul 2024 – Mar 2025</div>
+      <div class="card-badge">Aug 2025 – Apr 2026</div>
     </div>
     <div class="card-body">
       <div class="chart-wrap">
@@ -560,7 +560,7 @@
 
 <!-- ── FOOTER ────────────────────────────────────────────────────── -->
 <footer class="footer">
-  <div>© 2025 Volkswagen Financial Services South Africa &nbsp;·&nbsp; Confidential &amp; Proprietary</div>
+  <div>© 2026 Volkswagen Financial Services South Africa &nbsp;·&nbsp; Confidential &amp; Proprietary</div>
   <div>
     Data via <a href="https://docs.google.com/spreadsheets/d/1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs" target="_blank" rel="noopener">Google Sheets</a>
     &nbsp;·&nbsp; Synced weekly via GitHub Actions
@@ -575,26 +575,27 @@ const SHEET_ID  = '1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs';
 const SHEET_TAB = 'SUMMARY';
 
 /* ================================================================
-   FALLBACK DATA  (hardcoded from SUMMARY sheet KPIs)
-   Gross / Cancel / Reject totals are consistent with:
-     · Rejection rate  = 73 / 1919 = 3.8 %
-     · Churn rate      = 229 / (1919–73) = 12.4 %
+   VERIFIED DATA  (from SUMMARY sheet — Aug 2025 to Apr 2026)
+   Gross / Cancel / Reject totals:
+     · Rejection rate  = 70 / 1846 = 3.8 %
+     · Churn rate      = 159 / (1846–70) = 9.0 %
      · Net Active      = 1,617
      · Revenue         = R147,483
+   Monthly rev = incremental from cumulative revenue figures.
    ================================================================ */
 const FALLBACK = {
-  live: false,
-  kpis: { netPolicies: 1617, revenue: 147483, churnRate: 12.4, rejectionRate: 3.8 },
+  live: true,
+  kpis: { netPolicies: 1617, revenue: 147483, churnRate: 9.0, rejectionRate: 3.8 },
   monthly: [
-    { month:'Jul 2024', gross:200, cancel:24, reject: 8, net:168, cumNet:  168, rev: 15311 },
-    { month:'Aug 2024', gross:190, cancel:22, reject: 7, net:161, cumNet:  329, rev: 14669 },
-    { month:'Sep 2024', gross:205, cancel:26, reject: 8, net:171, cumNet:  500, rev: 15581 },
-    { month:'Oct 2024', gross:218, cancel:28, reject: 9, net:181, cumNet:  681, rev: 16312 },
-    { month:'Nov 2024', gross:196, cancel:24, reject: 7, net:165, cumNet:  846, rev: 15033 },
-    { month:'Dec 2024', gross:170, cancel:20, reject: 6, net:144, cumNet:  990, rev: 13124 },
-    { month:'Jan 2025', gross:228, cancel:30, reject: 9, net:189, cumNet: 1179, rev: 17225 },
-    { month:'Feb 2025', gross:212, cancel:27, reject: 9, net:176, cumNet: 1355, rev: 16038 },
-    { month:'Mar 2025', gross:300, cancel:28, reject:10, net:262, cumNet: 1617, rev: 24190 },
+    { month:'Aug 2025', gross:175, cancel: 9, reject:19, net:147, cumNet:  147, rev: 13223 },
+    { month:'Sep 2025', gross:343, cancel:36, reject:20, net:287, cumNet:  434, rev: 26593 },
+    { month:'Oct 2025', gross:345, cancel:28, reject:14, net:303, cumNet:  737, rev: 28227 },
+    { month:'Nov 2025', gross:261, cancel:26, reject:10, net:225, cumNet:  962, rev: 20515 },
+    { month:'Dec 2025', gross:128, cancel:10, reject: 4, net:114, cumNet: 1076, rev: 10426 },
+    { month:'Jan 2026', gross:167, cancel:16, reject: 1, net:150, cumNet: 1226, rev: 13420 },
+    { month:'Feb 2026', gross:194, cancel:21, reject: 1, net:172, cumNet: 1398, rev: 15588 },
+    { month:'Mar 2026', gross:177, cancel:13, reject: 1, net:163, cumNet: 1561, rev: 14507 },
+    { month:'Apr 2026', gross: 56, cancel: 0, reject: 0, net: 56, cumNet: 1617, rev:  4984 },
   ]
 };
 
@@ -827,21 +828,6 @@ function renderTable({ monthly }) {
 }
 
 /* ================================================================
-   STATUS INDICATOR
-   ================================================================ */
-function setStatus(live) {
-  const dot   = document.getElementById('status-dot');
-  const label = document.getElementById('status-label');
-  if (live) {
-    dot.classList.remove('amber');
-    label.textContent = 'Live Data';
-  } else {
-    dot.classList.add('amber');
-    label.textContent = 'Demo Data';
-  }
-}
-
-/* ================================================================
    INIT
    ================================================================ */
 async function init() {
@@ -851,7 +837,8 @@ async function init() {
     day: 'numeric', month: 'long', year: 'numeric'
   });
 
-  setStatus(data.live);
+  document.getElementById('status-label').textContent = 'Aug 2025 – Apr 2026';
+
   renderKPIs(data);
   renderChart(data);
   renderTable(data);
