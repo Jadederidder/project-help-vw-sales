@@ -3,6 +3,13 @@
 scripts/export_accounts.py
 Reads monthly drilldown tabs from Google Sheets and writes
 docs/data/accounts.json for the GitHub Pages dashboard.
+
+Run locally:
+  export GOOGLE_SHEETS_CREDENTIALS=$(cat /path/to/service-account.json)
+  python3 scripts/export_accounts.py
+
+Or pass the file path directly:
+  CREDS_FILE=/path/to/sa.json python3 scripts/export_accounts.py
 """
 
 import os
@@ -30,24 +37,31 @@ SCOPES = [
 
 # JSON key → sheet tab name
 DRILLDOWN_TABS = {
-    "2025-08": "Feb26 Data",
-    "2025-09": "Mar26 Data",
-    "2025-10": "April26 Data",
-    "2025-11": "May26 Data",
-    "2025-12": "Jun26 Data",
-    "2026-01": "Jul26 Data",
-    "2026-02": "Aug26 Data",
-    "2026-03": "Sep26 Data",
+    "2025-08": "Feb'26 Invoice data",
+    "2025-09": "Mar'26 Invoice Data",
+    "2025-10": "April'26 Invoice Data",
+    "2025-11": "May'26 Invoice data",
+    "2025-12": "Jun'26 Invoice Data",
+    "2026-01": "Jul'26 Invoice Data",
+    "2026-02": "Aug'26 Invoice Data",
+    "2026-03": "Sep'26 Invoice Data",
 }
 
 
 def get_client():
-    creds_json = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
-    if not creds_json:
-        raise ValueError("GOOGLE_SHEETS_CREDENTIALS not set")
-    creds = Credentials.from_service_account_info(
-        json.loads(creds_json), scopes=SCOPES
-    )
+    # Prefer a file path env var for local use
+    creds_file = os.environ.get("CREDS_FILE", "")
+    if creds_file:
+        creds_info = json.load(open(creds_file))
+    else:
+        creds_json = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
+        if not creds_json:
+            raise ValueError(
+                "Set CREDS_FILE=/path/to/sa.json  or  GOOGLE_SHEETS_CREDENTIALS=<json>"
+            )
+        creds_info = json.loads(creds_json)
+
+    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
@@ -65,15 +79,19 @@ def read_tab(spreadsheet, tab_name):
 
     result = []
     for row in rows:
-        # Normalise keys for safe lookup
         norm = {str(k).strip().lower(): str(v).strip() for k, v in row.items()}
 
         account = norm.get("account number", "")
+        status  = norm.get("status", "")
 
         if not account:
             continue
 
-        # Customer column is labelled "Customer (VW/AUDI)" — match loosely
+        logger.debug("    account=%s status=%r", account, status)
+
+        if status.upper() != "YES":
+            continue
+
         customer = ""
         for k, v in norm.items():
             if "customer" in k:
@@ -109,7 +127,7 @@ def main():
         json.dump(output, f, indent=2)
 
     total = sum(len(v) for v in output.values())
-    logger.info("Written %s — %d accounts across %d months", OUTPUT_PATH, total, len(output))
+    logger.info("Written %s  —  %d accounts across %d months", OUTPUT_PATH, total, len(output))
     logger.info("=" * 60)
 
 
