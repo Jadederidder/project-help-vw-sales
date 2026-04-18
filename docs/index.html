@@ -447,6 +447,213 @@
       border-top-color: #0D1526;
     }
 
+    /* ── DRILLDOWN BUTTON ───────────────────────────────────────── */
+    .btn-drill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 5px;
+      font-size: 10.5px;
+      font-weight: 600;
+      color: var(--accent);
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      letter-spacing: 0.2px;
+      transition: color 0.14s;
+      font-family: inherit;
+    }
+    .btn-drill:hover { color: var(--navy); }
+    .btn-drill svg { width: 11px; height: 11px; flex-shrink: 0; }
+
+    /* ── MODAL ───────────────────────────────────────────────────── */
+    #acct-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 8000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.2s ease, visibility 0.2s ease;
+    }
+    #acct-modal.open { opacity: 1; visibility: visible; }
+
+    .modal-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(13,21,38,0.58);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+    }
+    .modal-card {
+      position: relative;
+      background: white;
+      border-radius: 16px;
+      width: 100%;
+      max-width: 720px;
+      max-height: 82vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 32px 96px rgba(0,0,0,0.38), 0 4px 16px rgba(0,0,0,0.18);
+      animation: mIn 0.22s cubic-bezier(0.34,1.4,0.64,1) both;
+    }
+    @keyframes mIn {
+      from { transform: scale(0.93) translateY(12px); opacity: 0; }
+      to   { transform: scale(1)    translateY(0);    opacity: 1; }
+    }
+
+    .modal-head {
+      background: linear-gradient(135deg, var(--navy-dark) 0%, var(--navy) 100%);
+      border-radius: 16px 16px 0 0;
+      padding: 20px 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .modal-head-left { display: flex; align-items: center; gap: 12px; }
+    .modal-title {
+      font-size: 16px;
+      font-weight: 800;
+      color: white;
+      letter-spacing: -0.3px;
+    }
+    #modal-count {
+      font-size: 11.5px;
+      font-weight: 600;
+      background: rgba(255,255,255,0.14);
+      color: rgba(255,255,255,0.88);
+      padding: 3px 10px;
+      border-radius: 12px;
+      white-space: nowrap;
+    }
+    .modal-close {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: rgba(255,255,255,0.85);
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.14s;
+      flex-shrink: 0;
+    }
+    .modal-close:hover { background: rgba(255,255,255,0.22); }
+
+    .modal-sub {
+      padding: 9px 22px;
+      font-size: 12px;
+      color: var(--text-3);
+      background: var(--silver-bg);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .modal-body {
+      overflow-y: auto;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .modal-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 52px 24px;
+      color: var(--text-3);
+      font-size: 14px;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .modal-state small {
+      font-size: 12px;
+      color: var(--text-3);
+      display: block;
+      margin-top: 4px;
+    }
+    .spinner {
+      width: 22px;
+      height: 22px;
+      border: 2.5px solid var(--border);
+      border-top-color: var(--navy);
+      border-radius: 50%;
+      animation: spin 0.65s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Account table inside modal */
+    .acct-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .acct-table thead th {
+      position: sticky;
+      top: 0;
+      background: var(--silver-bg);
+      border-bottom: 2px solid var(--border);
+      padding: 10px 16px;
+      text-align: left;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--text-3);
+      white-space: nowrap;
+      z-index: 1;
+    }
+    .acct-table thead th:first-child { padding-left: 22px; }
+    .acct-table thead th:last-child  { padding-right: 22px; }
+    .acct-table tbody tr {
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    .acct-table tbody tr:hover { background: #F5F8FF; }
+    .acct-table tbody tr:last-child { border-bottom: none; }
+    .acct-table tbody td {
+      padding: 10px 16px;
+      color: var(--text-1);
+      vertical-align: middle;
+    }
+    .acct-table tbody td:first-child { padding-left: 22px; }
+    .acct-table tbody td:last-child  { padding-right: 22px; }
+
+    .acct-num {
+      font-family: 'SF Mono', 'Fira Code', 'Roboto Mono', monospace;
+      font-size: 12.5px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      color: var(--navy);
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .badge-yes  { background: var(--success-bg); color: var(--success); }
+    .badge-no   { background: #FEE2E2;           color: #B91C1C; }
+    .badge-other { background: var(--silver-bg); color: var(--text-3); }
+
+    @media (max-width: 540px) {
+      .modal-card { max-height: 90vh; border-radius: 14px; }
+      .acct-table { font-size: 12px; }
+    }
+
     /* ── FOOTER ─────────────────────────────────────────────────── */
     .footer {
       max-width: 1240px;
@@ -635,6 +842,24 @@
     &nbsp;·&nbsp; Synced weekly via GitHub Actions
   </div>
 </footer>
+
+<!-- ── ACCOUNT DRILLDOWN MODAL ──────────────────────────────────── -->
+<div id="acct-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-backdrop" onclick="closeModal()"></div>
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-head-left">
+        <span class="modal-title" id="modal-title">Accounts</span>
+        <span id="modal-count"></span>
+      </div>
+      <button class="modal-close" onclick="closeModal()" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-sub">
+      Commission-eligible accounts &nbsp;·&nbsp; Status: <strong>YES</strong> (active only)
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
 
 <script>
 /* ================================================================
@@ -878,9 +1103,21 @@ function renderTable({ monthly }) {
   let html = '';
   for (const r of monthly) {
     const pct = Math.round((r.gross / maxGross) * 100);
+    const hasSheet = r.month in SHEET_MAP;
     html += `
       <tr>
-        <td>${r.month}</td>
+        <td>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            ${r.month}
+            ${hasSheet ? `<button class="btn-drill" onclick="openModal('${r.month}')">
+              <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="1" y="3" width="10" height="8" rx="1.2"/>
+                <path d="M4 3V2a2 2 0 0 1 4 0v1"/><line x1="1" y1="6" x2="11" y2="6"/>
+              </svg>
+              View accounts
+            </button>` : ''}
+          </div>
+        </td>
         <td>
           <div class="bar-cell">
             ${fmtN(r.gross)}
@@ -920,6 +1157,122 @@ function renderTable({ monthly }) {
 
   document.getElementById('tbl-body').innerHTML = html;
 }
+
+/* ================================================================
+   ACCOUNT DRILLDOWN
+   ================================================================ */
+const SHEET_MAP = {
+  'Aug 2025': 'Feb26 Data',
+  'Sep 2025': 'Mar26 Data',
+  'Oct 2025': 'April26 Data',
+  'Nov 2025': 'May26 Data',
+  'Dec 2025': 'Jun26 Data',
+  'Jan 2026': 'Jul26 Data',
+  'Feb 2026': 'Aug26 Data',
+  'Mar 2026': 'Sep26 Data',
+};
+
+const acctCache = {};
+
+async function fetchAccounts(sheetName) {
+  if (acctCache[sheetName]) return acctCache[sheetName];
+
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&t=${Date.now()}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const txt = await res.text();
+
+  const m = txt.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\)/);
+  if (!m) throw new Error('Unexpected response format');
+  const gviz = JSON.parse(m[1]);
+
+  if (!gviz.table?.rows?.length) return [];
+
+  const cols = (gviz.table.cols || []).map(c => String(c.label || '').toLowerCase().trim());
+  const iAcct = cols.findIndex(c => c.includes('account'));
+  const iCust = cols.findIndex(c => c.includes('customer') || c.includes('vw') || c.includes('audi'));
+  const iMem  = cols.findIndex(c => c.includes('membership') || c.includes('type'));
+  const iStat = cols.findIndex(c => c.includes('status'));
+
+  const v = (row, i) => (i >= 0 && row.c?.[i]?.v != null) ? String(row.c[i].v).trim() : '';
+
+  const rows = gviz.table.rows
+    .map(row => ({
+      account:    v(row, iAcct),
+      customer:   v(row, iCust),
+      membership: v(row, iMem),
+      status:     v(row, iStat),
+    }))
+    .filter(a => a.account && a.status.toUpperCase() === 'YES');
+
+  acctCache[sheetName] = rows;
+  return rows;
+}
+
+function openModal(month) {
+  const modal    = document.getElementById('acct-modal');
+  const titleEl  = document.getElementById('modal-title');
+  const countEl  = document.getElementById('modal-count');
+  const bodyEl   = document.getElementById('modal-body');
+  const sheetName = SHEET_MAP[month];
+
+  titleEl.textContent = month + ' — Active Accounts';
+  countEl.textContent = '';
+  bodyEl.innerHTML = `<div class="modal-state"><div class="spinner"></div><span>Loading accounts…</span></div>`;
+  modal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  if (!sheetName) {
+    bodyEl.innerHTML = `<div class="modal-state">Account data not yet available for ${month}.</div>`;
+    return;
+  }
+
+  fetchAccounts(sheetName)
+    .then(accounts => {
+      countEl.textContent = `${accounts.length.toLocaleString()} account${accounts.length !== 1 ? 's' : ''}`;
+
+      if (!accounts.length) {
+        bodyEl.innerHTML = `<div class="modal-state">No active accounts found for ${month}.</div>`;
+        return;
+      }
+
+      const rows = accounts.map(a => {
+        const badge = a.status.toUpperCase() === 'YES'
+          ? '<span class="badge badge-yes">Active</span>'
+          : `<span class="badge badge-no">${a.status || 'Inactive'}</span>`;
+        return `<tr>
+          <td class="acct-num">${a.account || '—'}</td>
+          <td>${a.customer  || '—'}</td>
+          <td>${a.membership || '—'}</td>
+          <td>${badge}</td>
+        </tr>`;
+      }).join('');
+
+      bodyEl.innerHTML = `
+        <table class="acct-table">
+          <thead><tr>
+            <th>Account Number</th><th>Customer</th><th>Membership Type</th><th>Status</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    })
+    .catch(err => {
+      console.error('[Drilldown]', err);
+      bodyEl.innerHTML = `<div class="modal-state" style="color:var(--warn);">
+        Could not load account data.
+        <small>Make sure the Google Sheet is shared: <em>Anyone with the link → Viewer</em>.</small>
+      </div>`;
+    });
+}
+
+function closeModal() {
+  document.getElementById('acct-modal').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+});
 
 /* ================================================================
    FLOATING TOOLTIP  (body-level, escapes overflow:hidden parents)
