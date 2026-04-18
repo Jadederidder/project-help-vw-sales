@@ -390,6 +390,60 @@
       transition: width 0.6s ease;
     }
 
+    /* ── TOOLTIP ────────────────────────────────────────────────── */
+    .th-tip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      position: relative;
+      cursor: default;
+    }
+    .th-tip .tip-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.25);
+      font-size: 9px;
+      font-style: normal;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .th-tip .tip-box {
+      visibility: hidden;
+      opacity: 0;
+      position: absolute;
+      bottom: calc(100% + 10px);
+      left: 50%;
+      transform: translateX(-50%);
+      width: 240px;
+      background: #0D1526;
+      color: rgba(255,255,255,0.88);
+      font-size: 11.5px;
+      font-weight: 400;
+      line-height: 1.5;
+      padding: 10px 12px;
+      border-radius: 8px;
+      letter-spacing: 0;
+      text-transform: none;
+      pointer-events: none;
+      transition: opacity 0.18s ease;
+      z-index: 100;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .th-tip .tip-box::after {
+      content: '';
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 6px solid transparent;
+      border-top-color: #0D1526;
+    }
+    .th-tip:hover .tip-box { visibility: visible; opacity: 1; }
+
     /* ── FOOTER ─────────────────────────────────────────────────── */
     .footer {
       max-width: 1240px;
@@ -526,7 +580,7 @@
     <div class="card-head">
       <div>
         <div class="card-title">Monthly Performance Breakdown</div>
-        <div class="card-desc">Gross eligible · Cancellations · Rejections · Net subs · Revenue — all 9 months</div>
+        <div class="card-desc">Gross eligible · Cancellations · Rejections · Net Individual &amp; Family · Revenue breakdown · Collected · VW Invoice &amp; Lock</div>
       </div>
       <div class="card-badge">9 Months</div>
     </div>
@@ -539,14 +593,26 @@
               <th>Gross Eligible</th>
               <th>Cancellations</th>
               <th>Rejections</th>
-              <th>Net Subs</th>
+              <th>Net Individual</th>
+              <th>Net Family</th>
               <th>Cumulative Net</th>
-              <th>Revenue</th>
+              <th>Individual Revenue</th>
+              <th>Family Revenue</th>
+              <th>Total Revenue</th>
+              <th>Collected Revenue</th>
+              <th>VW Book Invoice</th>
+              <th>
+                <span class="th-tip">
+                  VW Billing Lock
+                  <i class="tip-icon">i</i>
+                  <span class="tip-box">The locked commission amount for this invoice period — remains fixed even if policies cancel after the billing date.</span>
+                </span>
+              </th>
             </tr>
           </thead>
           <tbody id="tbl-body">
             <tr>
-              <td colspan="7" style="text-align:center;padding:40px 24px;color:var(--text-3);">
+              <td colspan="13" style="text-align:center;padding:40px 24px;color:var(--text-3);">
                 Loading data…
               </td>
             </tr>
@@ -587,15 +653,16 @@ const FALLBACK = {
   live: true,
   kpis: { netPolicies: 1617, revenue: 147483, churnRate: 9.0, rejectionRate: 3.8 },
   monthly: [
-    { month:'Aug 2025', gross:175, cancel: 9, reject:19, net:147, cumNet:  147, rev: 13223 },
-    { month:'Sep 2025', gross:343, cancel:36, reject:20, net:287, cumNet:  434, rev: 26593 },
-    { month:'Oct 2025', gross:345, cancel:28, reject:14, net:303, cumNet:  737, rev: 28227 },
-    { month:'Nov 2025', gross:261, cancel:26, reject:10, net:225, cumNet:  962, rev: 20515 },
-    { month:'Dec 2025', gross:128, cancel:10, reject: 4, net:114, cumNet: 1076, rev: 10426 },
-    { month:'Jan 2026', gross:167, cancel:16, reject: 1, net:150, cumNet: 1226, rev: 13420 },
-    { month:'Feb 2026', gross:194, cancel:21, reject: 1, net:172, cumNet: 1398, rev: 15588 },
-    { month:'Mar 2026', gross:177, cancel:13, reject: 1, net:163, cumNet: 1561, rev: 14507 },
-    { month:'Apr 2026', gross: 56, cancel: 0, reject: 0, net: 56, cumNet: 1617, rev:  4984 },
+    //          month        gross  cancel reject  net  netInd netFam cumNet  rev    indRev  famRev totalRevCum collected  vwInvoice vwLock
+    { month:'Aug 2025', gross:175, cancel: 9, reject:19, net:147, netInd:145, netFam: 2, cumNet:  147, rev: 13223, indRev: 12905, famRev:   318, totalRevCum:  13223, collected:   null, vwInvoice:  2733, vwLock: 2770 },
+    { month:'Sep 2025', gross:343, cancel:36, reject:20, net:287, netInd:272, netFam:15, cumNet:  434, rev: 26593, indRev: 24208, famRev:  2385, totalRevCum:  39816, collected:   null, vwInvoice:  8229, vwLock: 8266 },
+    { month:'Oct 2025', gross:345, cancel:28, reject:14, net:303, netInd:285, netFam:18, cumNet:  737, rev: 28227, indRev: 25365, famRev:  2862, totalRevCum:  68043, collected:  44012, vwInvoice: 14062, vwLock: null },
+    { month:'Nov 2025', gross:261, cancel:26, reject:10, net:225, netInd:218, netFam: 7, cumNet:  962, rev: 20515, indRev: 19402, famRev:  1113, totalRevCum:  88558, collected:  70834, vwInvoice: 18302, vwLock: null },
+    { month:'Dec 2025', gross:128, cancel:10, reject: 4, net:114, netInd:110, netFam: 4, cumNet: 1076, rev: 10426, indRev:  9790, famRev:   636, totalRevCum:  98984, collected:  91025, vwInvoice: 20457, vwLock: null },
+    { month:'Jan 2026', gross:167, cancel:16, reject: 1, net:150, netInd:149, netFam: 1, cumNet: 1226, rev: 13420, indRev: 13261, famRev:   159, totalRevCum: 112404, collected: 102608, vwInvoice: 23231, vwLock: null },
+    { month:'Feb 2026', gross:194, cancel:21, reject: 1, net:172, netInd:168, netFam: 4, cumNet: 1398, rev: 15588, indRev: 14952, famRev:   636, totalRevCum: 127992, collected: 111972, vwInvoice: 26453, vwLock: null },
+    { month:'Mar 2026', gross:177, cancel:13, reject: 1, net:163, netInd:163, netFam: 0, cumNet: 1561, rev: 14507, indRev: 14507, famRev:     0, totalRevCum: 142499, collected: 125818, vwInvoice: 29451, vwLock: null },
+    { month:'Apr 2026', gross: 56, cancel: 0, reject: 0, net: 56, netInd: 56, netFam: 0, cumNet: 1617, rev:  4984, indRev:  4984, famRev:     0, totalRevCum: 147483, collected:   null, vwInvoice: 30481, vwLock: null },
   ]
 };
 
@@ -785,13 +852,25 @@ function renderChart({ monthly }) {
 /* ================================================================
    RENDER TABLE
    ================================================================ */
+const dash = `<span style="color:var(--text-3);font-weight:400">—</span>`;
+
 function renderTable({ monthly }) {
   const maxGross = Math.max(...monthly.map(r => r.gross));
   const tot = monthly.reduce(
-    (a, r) => ({ gross: a.gross+r.gross, cancel: a.cancel+r.cancel, reject: a.reject+r.reject, net: a.net+r.net, rev: a.rev+r.rev }),
-    { gross: 0, cancel: 0, reject: 0, net: 0, rev: 0 }
+    (a, r) => ({
+      gross:  a.gross  + r.gross,
+      cancel: a.cancel + r.cancel,
+      reject: a.reject + r.reject,
+      netInd: a.netInd + r.netInd,
+      netFam: a.netFam + r.netFam,
+      net:    a.net    + r.net,
+      indRev: a.indRev + r.indRev,
+      famRev: a.famRev + r.famRev,
+      rev:    a.rev    + r.rev,
+    }),
+    { gross:0, cancel:0, reject:0, netInd:0, netFam:0, net:0, indRev:0, famRev:0, rev:0 }
   );
-  const lastCumNet = monthly.at(-1).cumNet || tot.net;
+  const last = monthly.at(-1);
 
   let html = '';
   for (const r of monthly) {
@@ -807,9 +886,15 @@ function renderTable({ monthly }) {
         </td>
         <td class="tag-cancel">${fmtN(r.cancel)}</td>
         <td class="tag-reject">${fmtN(r.reject)}</td>
-        <td>${fmtN(r.net)}</td>
+        <td>${fmtN(r.netInd)}</td>
+        <td>${r.netFam > 0 ? fmtN(r.netFam) : dash}</td>
         <td class="tag-cum">${fmtN(r.cumNet)}</td>
-        <td>${fmtR(r.rev)}</td>
+        <td>${fmtR(r.indRev)}</td>
+        <td>${r.famRev > 0 ? fmtR(r.famRev) : dash}</td>
+        <td class="tag-cum">${fmtR(r.totalRevCum)}</td>
+        <td>${r.collected != null ? fmtR(r.collected) : dash}</td>
+        <td>${r.vwInvoice != null ? fmtR(r.vwInvoice) : dash}</td>
+        <td>${r.vwLock    != null ? fmtR(r.vwLock)    : dash}</td>
       </tr>`;
   }
 
@@ -819,9 +904,15 @@ function renderTable({ monthly }) {
       <td>${fmtN(tot.gross)}</td>
       <td>${fmtN(tot.cancel)}</td>
       <td>${fmtN(tot.reject)}</td>
-      <td>${fmtN(tot.net)}</td>
-      <td>${fmtN(lastCumNet)}</td>
-      <td>${fmtR(tot.rev)}</td>
+      <td>${fmtN(tot.netInd)}</td>
+      <td>${fmtN(tot.netFam)}</td>
+      <td>${fmtN(last.cumNet)}</td>
+      <td>${fmtR(tot.indRev)}</td>
+      <td>${fmtR(tot.famRev)}</td>
+      <td>${fmtR(last.totalRevCum)}</td>
+      <td>${last.collected != null ? fmtR(last.collected) : dash}</td>
+      <td>${fmtR(last.vwInvoice)}</td>
+      <td>${last.vwLock != null ? fmtR(last.vwLock) : dash}</td>
     </tr>`;
 
   document.getElementById('tbl-body').innerHTML = html;
