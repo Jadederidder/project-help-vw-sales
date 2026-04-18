@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VW All Road Premium Help — Campaign Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --navy:        #1F3864;
+      --navy-dark:   #152847;
+      --navy-mid:    #254477;
+      --navy-light:  #3A5FAA;
+      --silver:      #C8CDD5;
+      --silver-bg:   #F2F4F8;
+      --white:       #FFFFFF;
+      --text-1:      #0D1526;
+      --text-2:      #445060;
+      --text-3:      #7A8899;
+      --success:     #1A7F4E;
+      --success-bg:  #E9F7EF;
+      --warn:        #C05A1A;
+      --warn-bg:     #FDF0E6;
+      --purple:      #5A38B0;
+      --purple-bg:   #EEE9F8;
+      --accent:      #2B7FD4;
+      --border:      #DDE2EA;
+      --card-shadow: 0 1px 4px rgba(0,0,0,0.07), 0 8px 28px rgba(0,0,0,0.05);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--silver-bg);
+      color: var(--text-1);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── LOADING SCREEN ─────────────────────────────────────────── */
+    #splash {
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(145deg, var(--navy-dark) 0%, var(--navy) 60%, var(--navy-mid) 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      transition: opacity 0.7s ease, visibility 0.7s ease;
+    }
+    #splash.gone { opacity: 0; visibility: hidden; }
+
+    .splash-vw {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      font-weight: 900;
+      color: var(--navy);
+      letter-spacing: -2px;
+      margin-bottom: 28px;
+      box-shadow: 0 0 0 12px rgba(255,255,255,0.08);
+    }
+    .splash-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.9);
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .splash-sub {
+      font-size: 13px;
+      color: rgba(255,255,255,0.45);
+      letter-spacing: 1px;
+      margin-bottom: 32px;
+    }
+    .splash-bar {
+      width: 180px;
+      height: 2px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 1px;
+      overflow: hidden;
+    }
+    .splash-fill {
+      height: 100%;
+      background: rgba(255,255,255,0.7);
+      border-radius: 1px;
+      animation: splashload 1.4s cubic-bezier(.4,0,.2,1) forwards;
+    }
+    @keyframes splashload { from { width: 0 } to { width: 100% } }
+
+    /* ── HEADER ─────────────────────────────────────────────────── */
+    .hdr {
+      background: linear-gradient(135deg, var(--navy-dark) 0%, var(--navy) 55%, var(--navy-mid) 100%);
+      color: white;
+    }
+    .hdr-top {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 28px 28px 24px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    .vw-badge {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      font-weight: 900;
+      color: var(--navy);
+      letter-spacing: -1.5px;
+      flex-shrink: 0;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+    }
+    .hdr-text { flex: 1; min-width: 0; }
+    .hdr-eyebrow {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 2.5px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 4px;
+    }
+    .hdr-title {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      line-height: 1.15;
+    }
+    .hdr-subtitle {
+      font-size: 13px;
+      color: rgba(255,255,255,0.6);
+      margin-top: 3px;
+    }
+    .hdr-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 16px;
+      border-radius: 24px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #5CE5A3;
+      animation: blink 2.4s ease-in-out infinite;
+    }
+    .dot.amber { background: #F6BE5A; }
+    @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
+
+    .hdr-divider { height: 1px; background: rgba(255,255,255,0.08); }
+
+    .hdr-meta {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 10px 28px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 24px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.45);
+    }
+    .hdr-meta b { color: rgba(255,255,255,0.8); font-weight: 600; }
+
+    /* ── MAIN CONTENT ───────────────────────────────────────────── */
+    .wrap {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 32px 28px 48px;
+    }
+
+    .section-eyebrow {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 2.5px;
+      text-transform: uppercase;
+      color: var(--text-3);
+      margin-bottom: 14px;
+    }
+
+    /* ── KPI GRID ───────────────────────────────────────────────── */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+      margin-bottom: 28px;
+    }
+
+    .kpi {
+      background: var(--white);
+      border-radius: 16px;
+      padding: 24px 22px 22px;
+      border: 1px solid var(--border);
+      box-shadow: var(--card-shadow);
+      position: relative;
+      overflow: hidden;
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
+    }
+    .kpi:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.1), 0 20px 48px rgba(0,0,0,0.07);
+    }
+    .kpi::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--navy) 0%, var(--navy-light) 100%);
+    }
+    .kpi--warn::after  { background: linear-gradient(90deg, #C05A1A, #E88A3C); }
+    .kpi--purple::after { background: linear-gradient(90deg, #5A38B0, #8A6ED0); }
+
+    .kpi-icon-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .kpi-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 17px;
+    }
+    .kpi-icon--navy   { background: #EBF0FA; }
+    .kpi-icon--green  { background: var(--success-bg); }
+    .kpi-icon--warn   { background: var(--warn-bg); }
+    .kpi-icon--purple { background: var(--purple-bg); }
+
+    .kpi-trend {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 12px;
+    }
+    .kpi-trend--up     { background: var(--success-bg); color: var(--success); }
+    .kpi-trend--neutral { background: var(--silver-bg); color: var(--text-3); }
+
+    .kpi-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--text-3);
+      margin-bottom: 6px;
+    }
+    .kpi-value {
+      font-size: clamp(26px, 3.5vw, 40px);
+      font-weight: 900;
+      color: var(--navy);
+      letter-spacing: -1.5px;
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+    .kpi-value--md { font-size: clamp(22px, 2.8vw, 32px); letter-spacing: -1px; }
+    .kpi-caption {
+      font-size: 12px;
+      color: var(--text-3);
+      font-weight: 400;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    /* ── SECTION CARD ────────────────────────────────────────────── */
+    .card {
+      background: var(--white);
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      box-shadow: var(--card-shadow);
+      margin-bottom: 24px;
+      overflow: hidden;
+    }
+    .card-head {
+      padding: 22px 26px 0;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .card-title { font-size: 17px; font-weight: 800; letter-spacing: -0.3px; }
+    .card-desc  { font-size: 12px; color: var(--text-3); margin-top: 3px; }
+    .card-badge {
+      font-size: 11px;
+      font-weight: 600;
+      background: var(--silver-bg);
+      color: var(--text-2);
+      padding: 5px 12px;
+      border-radius: 8px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .card-body { padding: 22px 26px 26px; }
+
+    /* ── CHART ───────────────────────────────────────────────────── */
+    .chart-wrap { position: relative; height: 300px; }
+
+    /* ── TABLE ───────────────────────────────────────────────────── */
+    .tbl-scroll { overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+    }
+    thead tr {
+      background: var(--navy);
+    }
+    thead th {
+      padding: 12px 16px;
+      text-align: left;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: rgba(255,255,255,0.75);
+      white-space: nowrap;
+    }
+    thead th:first-child { padding-left: 24px; }
+    thead th:last-child  { padding-right: 24px; text-align: right; }
+
+    tbody tr {
+      border-bottom: 1px solid var(--border);
+      transition: background 0.12s;
+    }
+    tbody tr:hover { background: #F5F8FF; }
+    tbody tr.total-row {
+      background: linear-gradient(90deg, #EBF0FA 0%, #F5F8FF 100%);
+      border-top: 2px solid var(--navy);
+    }
+    tbody tr.total-row td { font-weight: 800; color: var(--navy); }
+    tbody tr:last-child { border-bottom: none; }
+
+    tbody td {
+      padding: 13px 16px;
+      color: var(--text-1);
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+    tbody td:first-child { padding-left: 24px; font-weight: 700; }
+    tbody td:last-child  { padding-right: 24px; text-align: right; font-weight: 700; color: var(--navy); }
+
+    .tag-cancel { color: var(--warn);   font-weight: 600; }
+    .tag-reject { color: var(--purple); font-weight: 600; }
+    .tag-cum    { color: var(--navy);   font-weight: 800; }
+
+    /* inline sparkbar */
+    .bar-cell { display: flex; align-items: center; gap: 10px; }
+    .bar-track {
+      flex: 1;
+      height: 5px;
+      background: var(--silver-bg);
+      border-radius: 3px;
+      overflow: hidden;
+      min-width: 56px;
+      max-width: 80px;
+    }
+    .bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--navy), var(--navy-light));
+      border-radius: 3px;
+      transition: width 0.6s ease;
+    }
+
+    /* ── FOOTER ─────────────────────────────────────────────────── */
+    .footer {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 0 28px 40px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 11.5px;
+      color: var(--text-3);
+    }
+    .footer a { color: var(--text-3); text-decoration: none; transition: color 0.15s; }
+    .footer a:hover { color: var(--navy); }
+
+    /* ── RESPONSIVE ─────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+      .hdr-top  { padding: 22px 20px 18px; }
+      .wrap     { padding: 24px 20px 40px; }
+    }
+    @media (max-width: 540px) {
+      .kpi-grid { grid-template-columns: 1fr; gap: 14px; }
+      .hdr-pill { display: none; }
+      .hdr-title { font-size: 20px; }
+      .card-head  { padding: 18px 18px 0; }
+      .card-body  { padding: 16px 18px 20px; }
+      tbody td:first-child { padding-left: 16px; }
+      thead th:first-child { padding-left: 16px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── LOADING SPLASH ─────────────────────────────────────────── -->
+<div id="splash">
+  <div class="splash-vw">VW</div>
+  <div class="splash-title">Campaign Dashboard</div>
+  <div class="splash-sub">Volkswagen Financial Services SA</div>
+  <div class="splash-bar"><div class="splash-fill"></div></div>
+</div>
+
+<!-- ── HEADER ────────────────────────────────────────────────────── -->
+<header class="hdr">
+  <div class="hdr-top">
+    <div class="vw-badge">VW</div>
+    <div class="hdr-text">
+      <div class="hdr-eyebrow">Volkswagen Financial Services South Africa</div>
+      <div class="hdr-title">All Road Premium Help</div>
+      <div class="hdr-subtitle">Campaign Performance Dashboard &nbsp;·&nbsp; <span id="hdr-date">Loading…</span></div>
+    </div>
+    <div class="hdr-pill">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-label">Loading…</span>
+    </div>
+  </div>
+  <div class="hdr-divider"></div>
+  <div class="hdr-meta">
+    Campaign period: <b>July 2024 – March 2025</b>
+    &nbsp;·&nbsp; 9 months tracked
+    &nbsp;·&nbsp; Data source: <b>Google Sheets</b>
+    &nbsp;·&nbsp; Synced weekly via GitHub Actions
+  </div>
+</header>
+
+<!-- ── MAIN ──────────────────────────────────────────────────────── -->
+<main class="wrap">
+
+  <!-- KPI section -->
+  <div class="section-eyebrow">Key Performance Indicators</div>
+  <div class="kpi-grid">
+
+    <div class="kpi">
+      <div class="kpi-icon-row">
+        <div class="kpi-icon kpi-icon--navy">📋</div>
+        <span class="kpi-trend kpi-trend--up">↑ Active</span>
+      </div>
+      <div class="kpi-label">Net Active Policies</div>
+      <div class="kpi-value" id="v-policies">—</div>
+      <div class="kpi-caption">Cumulative net subscriptions</div>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi-icon-row">
+        <div class="kpi-icon kpi-icon--green">💰</div>
+        <span class="kpi-trend kpi-trend--up">↑ Earned</span>
+      </div>
+      <div class="kpi-label">Cumulative Revenue</div>
+      <div class="kpi-value kpi-value--md" id="v-revenue">—</div>
+      <div class="kpi-caption">Total revenue to date</div>
+    </div>
+
+    <div class="kpi kpi--warn">
+      <div class="kpi-icon-row">
+        <div class="kpi-icon kpi-icon--warn">📉</div>
+        <span class="kpi-trend kpi-trend--neutral">Churn</span>
+      </div>
+      <div class="kpi-label">Total Churn Rate</div>
+      <div class="kpi-value" id="v-churn">—</div>
+      <div class="kpi-caption">Cancellations ÷ eligible subs</div>
+    </div>
+
+    <div class="kpi kpi--purple">
+      <div class="kpi-icon-row">
+        <div class="kpi-icon kpi-icon--purple">🚫</div>
+        <span class="kpi-trend kpi-trend--neutral">Rate</span>
+      </div>
+      <div class="kpi-label">Rejection Rate</div>
+      <div class="kpi-value" id="v-rejection">—</div>
+      <div class="kpi-caption">Rejections ÷ gross eligible</div>
+    </div>
+
+  </div>
+
+  <!-- Chart -->
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">Monthly New Sales Growth</div>
+        <div class="card-desc">Net subscriptions per month (bars) vs. cumulative total (line)</div>
+      </div>
+      <div class="card-badge">Jul 2024 – Mar 2025</div>
+    </div>
+    <div class="card-body">
+      <div class="chart-wrap">
+        <canvas id="chart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">Monthly Performance Breakdown</div>
+        <div class="card-desc">Gross eligible · Cancellations · Rejections · Net subs · Revenue — all 9 months</div>
+      </div>
+      <div class="card-badge">9 Months</div>
+    </div>
+    <div class="card-body" style="padding-left:0;padding-right:0;padding-bottom:0;">
+      <div class="tbl-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Sale Month</th>
+              <th>Gross Eligible</th>
+              <th>Cancellations</th>
+              <th>Rejections</th>
+              <th>Net Subs</th>
+              <th>Cumulative Net</th>
+              <th>Revenue</th>
+            </tr>
+          </thead>
+          <tbody id="tbl-body">
+            <tr>
+              <td colspan="7" style="text-align:center;padding:40px 24px;color:var(--text-3);">
+                Loading data…
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ── FOOTER ────────────────────────────────────────────────────── -->
+<footer class="footer">
+  <div>© 2025 Volkswagen Financial Services South Africa &nbsp;·&nbsp; Confidential &amp; Proprietary</div>
+  <div>
+    Data via <a href="https://docs.google.com/spreadsheets/d/1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs" target="_blank" rel="noopener">Google Sheets</a>
+    &nbsp;·&nbsp; Synced weekly via GitHub Actions
+  </div>
+</footer>
+
+<script>
+/* ================================================================
+   CONFIG
+   ================================================================ */
+const SHEET_ID  = '1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs';
+const SHEET_TAB = 'SUMMARY';
+
+/* ================================================================
+   FALLBACK DATA  (hardcoded from SUMMARY sheet KPIs)
+   Gross / Cancel / Reject totals are consistent with:
+     · Rejection rate  = 73 / 1919 = 3.8 %
+     · Churn rate      = 229 / (1919–73) = 12.4 %
+     · Net Active      = 1,617
+     · Revenue         = R147,483
+   ================================================================ */
+const FALLBACK = {
+  live: false,
+  kpis: { netPolicies: 1617, revenue: 147483, churnRate: 12.4, rejectionRate: 3.8 },
+  monthly: [
+    { month:'Jul 2024', gross:200, cancel:24, reject: 8, net:168, cumNet:  168, rev: 15311 },
+    { month:'Aug 2024', gross:190, cancel:22, reject: 7, net:161, cumNet:  329, rev: 14669 },
+    { month:'Sep 2024', gross:205, cancel:26, reject: 8, net:171, cumNet:  500, rev: 15581 },
+    { month:'Oct 2024', gross:218, cancel:28, reject: 9, net:181, cumNet:  681, rev: 16312 },
+    { month:'Nov 2024', gross:196, cancel:24, reject: 7, net:165, cumNet:  846, rev: 15033 },
+    { month:'Dec 2024', gross:170, cancel:20, reject: 6, net:144, cumNet:  990, rev: 13124 },
+    { month:'Jan 2025', gross:228, cancel:30, reject: 9, net:189, cumNet: 1179, rev: 17225 },
+    { month:'Feb 2025', gross:212, cancel:27, reject: 9, net:176, cumNet: 1355, rev: 16038 },
+    { month:'Mar 2025', gross:300, cancel:28, reject:10, net:262, cumNet: 1617, rev: 24190 },
+  ]
+};
+
+/* ================================================================
+   GOOGLE SHEETS LIVE FETCH
+   Works when the sheet is shared "Anyone with the link can view"
+   ================================================================ */
+async function fetchLive() {
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(SHEET_TAB)}&t=${Date.now()}`;
+    const res  = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const txt  = await res.text();
+
+    const m = txt.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\)/);
+    if (!m) throw new Error('Unexpected response format');
+    const gviz = JSON.parse(m[1]);
+
+    if (!gviz.table?.rows?.length) throw new Error('Empty table');
+
+    const cols = (gviz.table.cols || []).map(c => String(c.label || '').toLowerCase().trim());
+    const rows = gviz.table.rows;
+
+    const col = (...terms) => {
+      for (const t of terms) {
+        const i = cols.findIndex(c => c.includes(t.toLowerCase()));
+        if (i !== -1) return i;
+      }
+      return -1;
+    };
+
+    const iMonth  = col('month');
+    const iGross  = col('gross', 'eligible');
+    const iCancel = col('cancel');
+    const iReject = col('reject');
+    const iNet    = col('net sub');
+    const iCumNet = col('cumulative', 'cum');
+    const iRev    = col('revenue', 'rev');
+
+    if (iMonth < 0 || iGross < 0) throw new Error('Expected columns not found');
+
+    const v = (row, i) => (i >= 0 && row.c?.[i]?.v != null) ? row.c[i].v : null;
+
+    const monthly = [];
+    for (const row of rows) {
+      const m = String(v(row, iMonth) ?? '').trim();
+      if (!m || /total|summary/i.test(m)) continue;
+      monthly.push({
+        month:   m,
+        gross:   +v(row, iGross)  || 0,
+        cancel:  +v(row, iCancel) || 0,
+        reject:  +v(row, iReject) || 0,
+        net:     +v(row, iNet)    || 0,
+        cumNet:  +v(row, iCumNet) || 0,
+        rev:     +v(row, iRev)    || 0,
+      });
+    }
+    if (!monthly.length) throw new Error('No data rows');
+
+    const tGross  = monthly.reduce((s, r) => s + r.gross,  0);
+    const tCancel = monthly.reduce((s, r) => s + r.cancel, 0);
+    const tReject = monthly.reduce((s, r) => s + r.reject, 0);
+    const tRev    = monthly.reduce((s, r) => s + r.rev,    0);
+    const netPol  = monthly.at(-1).cumNet || monthly.reduce((s, r) => s + r.net, 0);
+    const eligible = tGross - tReject;
+
+    return {
+      live: true,
+      kpis: {
+        netPolicies:   netPol,
+        revenue:       tRev,
+        churnRate:     eligible ? +((tCancel / eligible) * 100).toFixed(1) : 0,
+        rejectionRate: tGross   ? +((tReject / tGross)   * 100).toFixed(1) : 0,
+      },
+      monthly
+    };
+  } catch (e) {
+    console.warn('[Dashboard] Live data unavailable:', e.message, '— using fallback');
+    return FALLBACK;
+  }
+}
+
+/* ================================================================
+   HELPERS
+   ================================================================ */
+const fmtN = n => Number(n).toLocaleString('en-ZA');
+const fmtR = n => 'R\u202F' + Number(n).toLocaleString('en-ZA');
+
+/* ================================================================
+   RENDER KPIs
+   ================================================================ */
+function renderKPIs({ kpis }) {
+  document.getElementById('v-policies').textContent  = fmtN(kpis.netPolicies);
+  document.getElementById('v-revenue').textContent   = fmtR(kpis.revenue);
+  document.getElementById('v-churn').textContent     = kpis.churnRate + '%';
+  document.getElementById('v-rejection').textContent = kpis.rejectionRate + '%';
+}
+
+/* ================================================================
+   RENDER CHART
+   ================================================================ */
+let chartInst;
+function renderChart({ monthly }) {
+  const labels   = monthly.map(r => r.month);
+  const netData  = monthly.map(r => r.net);
+  const cumData  = monthly.map(r => r.cumNet);
+
+  if (chartInst) chartInst.destroy();
+
+  chartInst = new Chart(document.getElementById('chart').getContext('2d'), {
+    data: {
+      labels,
+      datasets: [
+        {
+          type:            'bar',
+          label:           'Net New Subs',
+          data:            netData,
+          backgroundColor: 'rgba(31,56,100,0.82)',
+          borderRadius:    6,
+          borderSkipped:   false,
+          order:           2,
+        },
+        {
+          type:            'line',
+          label:           'Cumulative Net',
+          data:            cumData,
+          borderColor:     '#2B7FD4',
+          backgroundColor: 'rgba(43,127,212,0.07)',
+          borderWidth:     2.5,
+          pointBackgroundColor: '#2B7FD4',
+          pointRadius:     4,
+          pointHoverRadius: 6,
+          fill:            true,
+          tension:         0.35,
+          yAxisID:         'yRight',
+          order:           1,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          position: 'top',
+          align:    'end',
+          labels: {
+            boxWidth: 10, boxHeight: 10,
+            padding: 18,
+            font: { size: 12, family: 'Inter' },
+            color: '#7A8899',
+          }
+        },
+        tooltip: {
+          backgroundColor: 'rgba(15,28,58,0.94)',
+          titleColor: 'white',
+          bodyColor:  'rgba(255,255,255,0.78)',
+          padding:    14,
+          cornerRadius: 10,
+          callbacks: {
+            label: ctx => `  ${ctx.dataset.label}: ${fmtN(ctx.parsed.y)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: { font: { size: 12, family: 'Inter' }, color: '#7A8899', maxRotation: 0 }
+        },
+        y: {
+          grid: { color: 'rgba(0,0,0,0.04)', drawBorder: false },
+          ticks: { font: { size: 11, family: 'Inter' }, color: '#7A8899' },
+          title: { display: true, text: 'Net New Subs', font: { size: 11, family: 'Inter' }, color: '#7A8899' }
+        },
+        yRight: {
+          position: 'right',
+          grid: { display: false },
+          ticks: { font: { size: 11, family: 'Inter' }, color: '#2B7FD4' },
+          title: { display: true, text: 'Cumulative Net', font: { size: 11, family: 'Inter' }, color: '#2B7FD4' }
+        }
+      }
+    }
+  });
+}
+
+/* ================================================================
+   RENDER TABLE
+   ================================================================ */
+function renderTable({ monthly }) {
+  const maxGross = Math.max(...monthly.map(r => r.gross));
+  const tot = monthly.reduce(
+    (a, r) => ({ gross: a.gross+r.gross, cancel: a.cancel+r.cancel, reject: a.reject+r.reject, net: a.net+r.net, rev: a.rev+r.rev }),
+    { gross: 0, cancel: 0, reject: 0, net: 0, rev: 0 }
+  );
+  const lastCumNet = monthly.at(-1).cumNet || tot.net;
+
+  let html = '';
+  for (const r of monthly) {
+    const pct = Math.round((r.gross / maxGross) * 100);
+    html += `
+      <tr>
+        <td>${r.month}</td>
+        <td>
+          <div class="bar-cell">
+            ${fmtN(r.gross)}
+            <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+          </div>
+        </td>
+        <td class="tag-cancel">${fmtN(r.cancel)}</td>
+        <td class="tag-reject">${fmtN(r.reject)}</td>
+        <td>${fmtN(r.net)}</td>
+        <td class="tag-cum">${fmtN(r.cumNet)}</td>
+        <td>${fmtR(r.rev)}</td>
+      </tr>`;
+  }
+
+  html += `
+    <tr class="total-row">
+      <td>TOTAL</td>
+      <td>${fmtN(tot.gross)}</td>
+      <td>${fmtN(tot.cancel)}</td>
+      <td>${fmtN(tot.reject)}</td>
+      <td>${fmtN(tot.net)}</td>
+      <td>${fmtN(lastCumNet)}</td>
+      <td>${fmtR(tot.rev)}</td>
+    </tr>`;
+
+  document.getElementById('tbl-body').innerHTML = html;
+}
+
+/* ================================================================
+   STATUS INDICATOR
+   ================================================================ */
+function setStatus(live) {
+  const dot   = document.getElementById('status-dot');
+  const label = document.getElementById('status-label');
+  if (live) {
+    dot.classList.remove('amber');
+    label.textContent = 'Live Data';
+  } else {
+    dot.classList.add('amber');
+    label.textContent = 'Demo Data';
+  }
+}
+
+/* ================================================================
+   INIT
+   ================================================================ */
+async function init() {
+  const data = await fetchLive();
+
+  document.getElementById('hdr-date').textContent = new Date().toLocaleDateString('en-ZA', {
+    day: 'numeric', month: 'long', year: 'numeric'
+  });
+
+  setStatus(data.live);
+  renderKPIs(data);
+  renderChart(data);
+  renderTable(data);
+
+  setTimeout(() => document.getElementById('splash').classList.add('gone'), 900);
+}
+
+init();
+</script>
+</body>
+</html>
