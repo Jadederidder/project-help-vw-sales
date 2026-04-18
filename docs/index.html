@@ -324,7 +324,28 @@
     .chart-wrap { position: relative; height: 300px; }
 
     /* ── TABLE ───────────────────────────────────────────────────── */
+    .tbl-wrap { position: relative; }
     .tbl-scroll { overflow-x: auto; }
+    .tbl-scroll-hint {
+      position: absolute;
+      top: 0; right: 0; bottom: 0;
+      width: 64px;
+      background: linear-gradient(to right, transparent, rgba(255,255,255,0.92));
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 10px;
+      pointer-events: none;
+      transition: opacity 0.4s ease;
+    }
+    .tbl-scroll-hint.hidden { opacity: 0; }
+    .tbl-scroll-hint svg {
+      animation: hintpulse 1.4s ease-in-out infinite;
+    }
+    @keyframes hintpulse {
+      0%, 100% { transform: translateX(0);  opacity: 0.5; }
+      50%       { transform: translateX(4px); opacity: 1;   }
+    }
 
     table {
       width: 100%;
@@ -796,7 +817,8 @@
       <div class="card-badge">9 Months</div>
     </div>
     <div class="card-body" style="padding-left:0;padding-right:0;padding-bottom:0;">
-      <div class="tbl-scroll">
+      <div class="tbl-wrap">
+        <div class="tbl-scroll" id="tbl-scroll">
         <table>
           <thead>
             <tr>
@@ -827,6 +849,12 @@
             </tr>
           </tbody>
         </table>
+        </div>
+        <div class="tbl-scroll-hint" id="tbl-hint" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M7 4l6 6-6 6" stroke="#1F3864" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
       </div>
     </div>
   </div>
@@ -1312,6 +1340,10 @@ async function init() {
 
   setTimeout(() => document.getElementById('splash').classList.add('gone'), 900);
 }
+
+document.getElementById('tbl-scroll').addEventListener('scroll', function () {
+  document.getElementById('tbl-hint').classList.add('hidden');
+}, { once: true });
 
 init();
 </script>
