@@ -1175,9 +1175,16 @@ async function loadAccountsFile() {
   return acctData;
 }
 
+const MONTH_KEY_MAP = {
+  'Aug 2025': '2025-08', 'Sep 2025': '2025-09', 'Oct 2025': '2025-10',
+  'Nov 2025': '2025-11', 'Dec 2025': '2025-12', 'Jan 2026': '2026-01',
+  'Feb 2026': '2026-02', 'Mar 2026': '2026-03',
+};
+
 async function fetchAccounts(month) {
   const data = await loadAccountsFile();
-  return (data.months && data.months[month]) || [];
+  const key  = MONTH_KEY_MAP[month] || month;
+  return data[key] || [];
 }
 
 function openModal(month) {
@@ -1200,22 +1207,16 @@ function openModal(month) {
         return;
       }
 
-      const rows = accounts.map(a => {
-        const badge = a.status.toUpperCase() === 'YES'
-          ? '<span class="badge badge-yes">Active</span>'
-          : `<span class="badge badge-no">${a.status || 'Inactive'}</span>`;
-        return `<tr>
-          <td class="acct-num">${a.account || '—'}</td>
-          <td>${a.customer  || '—'}</td>
-          <td>${a.membership || '—'}</td>
-          <td>${badge}</td>
-        </tr>`;
-      }).join('');
+      const rows = accounts.map(a => `<tr>
+          <td class="acct-num">${a.account  || '—'}</td>
+          <td>${a.customer || '—'}</td>
+          <td>${a.type     || '—'}</td>
+        </tr>`).join('');
 
       bodyEl.innerHTML = `
         <table class="acct-table">
           <thead><tr>
-            <th>Account Number</th><th>Customer</th><th>Membership Type</th><th>Status</th>
+            <th>Account Number</th><th>Customer</th><th>Membership Type</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
