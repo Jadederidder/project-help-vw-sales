@@ -119,13 +119,24 @@ def main():
         logger.info(f"DRY RUN — would link Drilldown in col X row {row} → '{tab_label}'")
         return
     dash_gid = get_sheet_id(service, DASH_TAB)
-    formulas = build_formulas(row)
-    write_formulas(service, dash_gid, row, formulas)
+
+    # Skip if row already has data (e.g. manually filled)
+    existing = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID,
+        range=f"{DASH_TAB}!B{row}:B{row}"
+    ).execute()
+    if existing.get("values"):
+        logger.info(f"Row {row} already has data — skipping formula write")
+    else:
+        formulas = build_formulas(row)
+        write_formulas(service, dash_gid, row, formulas)
+
     if get_sheet_id(service, tab_name):
         logger.warning(f"Tab '{tab_name}' already exists — skipping creation")
         new_gid = get_sheet_id(service, tab_name)
     else:
         new_gid = create_invoice_tab(service, tab_name, row)
+
     write_drilldown(service, dash_gid, row, new_gid, tab_label)
     logger.info("=" * 60)
     logger.info("DONE")
