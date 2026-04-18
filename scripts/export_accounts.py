@@ -87,7 +87,7 @@ def read_tab(service, tab_name):
     for row in values[1:]:
         account    = cell(row, i_acct)
         status_val = cell(row, i_stat)
-        if account and status_val.upper() == "YES":
+        if account:
             rows.append({
                 "account":    account,
                 "customer":   cell(row, i_cust),
