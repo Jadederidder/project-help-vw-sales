@@ -21,8 +21,11 @@ def get_service():
     creds = Credentials.from_service_account_info(json.loads(os.environ["GOOGLE_SHEETS_CREDENTIALS"]), scopes=SCOPES)
     return build("sheets", "v4", credentials=creds)
 
-def last_month():
-    d = date.today().replace(day=1) - relativedelta(months=1)
+def last_month(override=None):
+    if override:
+        d = date.fromisoformat(override + "-01")
+    else:
+        d = date.today().replace(day=1) - relativedelta(months=1)
     return d.strftime("%Y-%m"), d
 
 def find_row(service, target_month):
@@ -99,7 +102,8 @@ def main():
     logger.info(f"Dry run  : {dry_run}")
     logger.info("=" * 60)
     service = get_service()
-    month_str, month_date = last_month()
+    target_month_override = os.environ.get("TARGET_MONTH") or None
+    month_str, month_date = last_month(target_month_override)
     logger.info(f"Processing : {month_str}")
     row = find_row(service, month_str)
     if not row:

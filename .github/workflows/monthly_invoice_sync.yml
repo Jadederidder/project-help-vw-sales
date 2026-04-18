@@ -9,6 +9,10 @@ on:
         description: "Dry run (true = analyse only, no changes)"
         required: false
         default: "false"
+      target_month:
+        description: "Override month to process (YYYY-MM, e.g. 2026-04). Leave blank to use last month."
+        required: false
+        default: ""
 
 jobs:
   sync-invoice:
@@ -32,4 +36,5 @@ jobs:
           EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
           DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
+          TARGET_MONTH:              ${{ github.event.inputs.target_month }}
         run: python scripts/sync_monthly_invoice.py
