@@ -42,9 +42,12 @@ def _norm(s):
 
 def get_sheet_id(service, tab_name):
     meta = service.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
+    norm_target = _norm(tab_name)
     for s in meta["sheets"]:
-        if _norm(s["properties"]["title"]) == _norm(tab_name):
+        title = s["properties"]["title"]
+        if _norm(title) == norm_target:
             return s["properties"]["sheetId"]
+    logger.info(f"get_sheet_id: '{tab_name}' not found. Existing tabs: {[s['properties']['title'] for s in meta['sheets']]}")
     return None
 
 def build_formulas(r):
@@ -85,9 +88,28 @@ def write_formulas(service, dash_gid, row, formulas):
     logger.info(f"Wrote {len(requests)} formulas → DASHBOARD row {row}")
 
 def create_invoice_tab(service, tab_name, dash_row):
-    res = service.spreadsheets().batchUpdate(spreadsheetId=SHEET_ID, body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}).execute()
-    new_gid = res["replies"][0]["addSheet"]["properties"]["sheetId"]
-    logger.info(f"Created tab '{tab_name}'  gid={new_gid}")
+    from googleapiclient.errors import HttpError as _HttpError
+    try:
+        res = service.spreadsheets().batchUpdate(spreadsheetId=SHEET_ID, body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}).execute()
+        new_gid = res["replies"][0]["addSheet"]["properties"]["sheetId"]
+        logger.info(f"Created tab '{tab_name}'  gid={new_gid}")
+    except _HttpError as e:
+        if e.resp.status == 400 and "already exists" in str(e):
+            logger.warning(f"Tab '{tab_name}' already exists (caught on create) — fetching its gid")
+            meta = service.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
+            norm_target = _norm(tab_name)
+            new_gid = None
+            for s in meta["sheets"]:
+                if _norm(s["properties"]["title"]) == norm_target:
+                    new_gid = s["properties"]["sheetId"]
+                    logger.info(f"Matched existing tab '{s['properties']['title']}'  gid={new_gid}")
+                    break
+            if new_gid is None:
+                all_tabs = [s["properties"]["title"] for s in meta["sheets"]]
+                logger.error(f"Could not match '{tab_name}'. All tabs: {all_tabs}")
+                raise
+            return new_gid
+        raise
     service.spreadsheets().values().update(spreadsheetId=SHEET_ID, range=f"'{tab_name}'!A1:E1", valueInputOption="USER_ENTERED", body={"values": [["Sale month","Account Number","Customer","Membership Type","Status"]]}).execute()
     formula = (f"=SORT(FILTER({{MASTER_BOOK!D:D,MASTER_BOOK!A:A,MASTER_BOOK!B:B,MASTER_BOOK!J:J,MASTER_BOOK!I:I}},TEXT(MASTER_BOOK!D:D,\"yyyy-mm\")<=DASHBOARD!$A{dash_row},UPPER(TRIM(MASTER_BOOK!G:G))=\"NO\",UPPER(TRIM(MASTER_BOOK!H:H))=\"NO\"),1,TRUE)")
     service.spreadsheets().values().update(spreadsheetId=SHEET_ID, range=f"'{tab_name}'!A2", valueInputOption="USER_ENTERED", body={"values": [[formula]]}).execute()
