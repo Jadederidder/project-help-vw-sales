@@ -38,7 +38,7 @@ def find_row(service, target_month):
     return None
 
 def _norm(s):
-    return s.replace('\u2019', "'").replace('\u2018', "'").strip()
+    return s.replace('\u2019', "'").replace('\u2018', "'").strip().lower()
 
 def get_sheet_id(service, tab_name):
     meta = service.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
