@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
     :root {
       --navy:        #1F3864;
@@ -484,8 +485,8 @@
     }
     .btn-drill:hover { background: var(--navy-light); transform: translateY(-1px); }
     .td-action { text-align: right; padding-right: 22px !important; }
-    .row-drill { cursor: pointer; }
-    .row-drill:hover { background: #EEF3FB !important; }
+    .row-drill, .row-select { cursor: pointer; }
+    .row-drill:hover, .row-select:hover { background: #EEF3FB !important; }
 
     /* ── MODAL ───────────────────────────────────────────────────── */
     #acct-modal {
@@ -690,6 +691,35 @@
     .footer a { color: var(--text-3); text-decoration: none; transition: color 0.15s; }
     .footer a:hover { color: var(--navy); }
 
+    /* ── DOWNLOAD BUTTON ────────────────────────────────────────── */
+    .btn-download {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: white;
+      background: var(--navy);
+      border: none;
+      padding: 9px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      letter-spacing: 0.2px;
+      transition: background 0.14s, transform 0.1s, opacity 0.15s;
+      font-family: inherit;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .btn-download:hover:not(:disabled) { background: var(--navy-light); transform: translateY(-1px); }
+    .btn-download:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+    .tbl-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    tbody tr.row-selected { background: #E8EFFE !important; outline: 2px solid var(--navy); outline-offset: -2px; }
+
     /* ── RESPONSIVE ─────────────────────────────────────────────── */
     @media (max-width: 900px) {
       .kpi-grid { grid-template-columns: repeat(2, 1fr); }
@@ -812,7 +842,13 @@
         <div class="card-title">Monthly Performance Breakdown</div>
         <div class="card-desc">Gross eligible · Cancellations · Rejections · Net Individual &amp; Family · Revenue breakdown · Collected · VW Invoice &amp; Lock</div>
       </div>
-      <div class="card-badge">9 Months</div>
+      <div class="tbl-actions">
+        <button id="btn-download-client" class="btn-download" disabled onclick="downloadClientList()" data-tip="Click a month row first to select it">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 3v10M6 9l4 4 4-4M3 17h14" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Download Client List
+        </button>
+        <div class="card-badge">9 Months</div>
+      </div>
     </div>
     <div class="card-body" style="padding-left:0;padding-right:0;padding-bottom:0;">
       <div class="tbl-wrap">
@@ -1125,9 +1161,11 @@ function renderTable({ monthly }) {
 
   let html = '';
   for (const r of monthly) {
-    const pct      = Math.round((r.gross / maxGross) * 100);
-    const canDrill = r.month in SHEET_MAP;
-    const rowAttr  = canDrill ? ' class="row-drill" data-month="' + r.month + '"' : '';
+    const pct        = Math.round((r.gross / maxGross) * 100);
+    const canDrill   = r.month in SHEET_MAP;
+    const canDl      = r.month in INVOICE_TAB_MAP;
+    const classes    = [canDrill ? 'row-drill' : '', canDl ? 'row-select' : ''].filter(Boolean).join(' ');
+    const rowAttr    = (canDrill || canDl) ? ' class="' + classes + '" data-month="' + r.month + '"' : '';
     html += '<tr' + rowAttr + '>'
       + '<td>' + r.month + '</td>'
       + '<td><div class="bar-cell">' + fmtN(r.gross) + '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div></div></td>'
@@ -1166,11 +1204,89 @@ function renderTable({ monthly }) {
   const tbody = document.getElementById('tbl-body');
   tbody.innerHTML = html;
 
-  // Single delegated listener — handles clicks on both the button and the row
+  // Single delegated listener — selects row for download, opens modal if drilldown available
   tbody.addEventListener('click', e => {
     const row = e.target.closest('tr[data-month]');
-    if (row) openModal(row.dataset.month);
+    if (!row) return;
+    // Update row selection highlight
+    document.querySelectorAll('#tbl-body tr.row-selected').forEach(r => r.classList.remove('row-selected'));
+    row.classList.add('row-selected');
+    selectedMonth = row.dataset.month;
+    const dlBtn = document.getElementById('btn-download-client');
+    if (dlBtn) dlBtn.disabled = !(selectedMonth in INVOICE_TAB_MAP);
+    // Open drilldown modal if available
+    if (row.dataset.month in SHEET_MAP) openModal(row.dataset.month);
   });
+}
+
+/* ================================================================
+   INVOICE DATA TAB MAP  (sale month → Invoice Data tab + filename key)
+   Tab name = sale month + 6 months, created by sync_monthly_invoice.py
+   ================================================================ */
+const INVOICE_TAB_MAP = {
+  'Aug 2025': { tab: "Feb'26 Invoice Data", ym: '2025-08' },
+  'Sep 2025': { tab: "Mar'26 Invoice Data", ym: '2025-09' },
+  'Oct 2025': { tab: "Apr'26 Invoice Data", ym: '2025-10' },
+  'Nov 2025': { tab: "May'26 Invoice Data", ym: '2025-11' },
+  'Dec 2025': { tab: "Jun'26 Invoice Data", ym: '2025-12' },
+  'Jan 2026': { tab: "Jul'26 Invoice Data", ym: '2026-01' },
+  'Feb 2026': { tab: "Aug'26 Invoice Data", ym: '2026-02' },
+  'Mar 2026': { tab: "Sep'26 Invoice Data", ym: '2026-03' },
+  'Apr 2026': { tab: "Oct'26 Invoice Data", ym: '2026-04' },
+  'May 2026': { tab: "Nov'26 Invoice Data", ym: '2026-05' },
+};
+
+let selectedMonth = null;
+
+async function downloadClientList() {
+  if (!selectedMonth || !(selectedMonth in INVOICE_TAB_MAP)) return;
+  const { tab, ym } = INVOICE_TAB_MAP[selectedMonth];
+  const btn = document.getElementById('btn-download-client');
+  const origHTML = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7" stroke="white" stroke-width="2.2" stroke-dasharray="30" stroke-dashoffset="10"><animateTransform attributeName="transform" type="rotate" from="0 10 10" to="360 10 10" dur="0.7s" repeatCount="indefinite"/></circle></svg> Fetching…';
+
+  try {
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(tab)}&t=${Date.now()}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const txt = await res.text();
+    const m = txt.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\)/);
+    if (!m) throw new Error('Unexpected response format');
+    const gviz = JSON.parse(m[1]);
+    if (gviz.status === 'error') throw new Error(gviz.errors?.[0]?.detailed_message || 'Sheet error');
+
+    const rows = gviz.table?.rows || [];
+    if (!rows.length) throw new Error('No data found in tab "' + tab + '". The sync workflow may not have created it yet.');
+
+    const wsData = [['Sale Month', 'Account Number', 'Customer', 'Membership Type', 'Status']];
+    for (const row of rows) {
+      if (!row.c) continue;
+      const vals = row.c.map(cell => {
+        if (!cell || cell.v == null) return '';
+        // Dates come as Date objects from gviz — format as YYYY-MM
+        if (cell.v instanceof Object && cell.v.constructor?.name === 'Date') {
+          return cell.f || cell.v;
+        }
+        return cell.f != null ? cell.f : cell.v;
+      });
+      if (vals.every(v => v === '' || v == null)) continue;
+      wsData.push(vals.slice(0, 5));
+    }
+    if (wsData.length < 2) throw new Error('Tab "' + tab + '" returned no data rows.');
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(wsData);
+    ws['!cols'] = [{ wch: 12 }, { wch: 18 }, { wch: 32 }, { wch: 18 }, { wch: 12 }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Client List');
+    XLSX.writeFile(wb, `VW_Client_List_${ym}.xlsx`);
+  } catch (err) {
+    console.error('[Download]', err);
+    alert('Could not download client list:\n\n' + err.message + '\n\nMake sure the Google Sheet is shared publicly and the Invoice Data tab exists for this month.');
+  } finally {
+    btn.innerHTML = origHTML;
+    btn.disabled = !(selectedMonth in INVOICE_TAB_MAP);
+  }
 }
 
 /* ================================================================
