@@ -14,6 +14,9 @@ on:
         required: false
         default: ""
 
+permissions:
+  contents: write
+
 jobs:
   sync-invoice:
     name: Sync Monthly Invoice Data
@@ -22,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -38,3 +43,18 @@ jobs:
           DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
           TARGET_MONTH:              ${{ github.event.inputs.target_month }}
         run: python scripts/sync_monthly_invoice.py
+
+      - name: Export summary data to JSON
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+        run: python scripts/export_summary.py
+
+      - name: Commit dashboard data to repo
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/data/summary.json
+          git diff --staged --quiet || git commit -m "chore: refresh dashboard data [skip ci]"
+          git push

@@ -44,10 +44,15 @@ jobs:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
         run: python scripts/export_accounts.py
 
-      - name: Commit updated accounts.json to repo
+      - name: Export summary data to JSON
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+        run: python scripts/export_summary.py
+
+      - name: Commit dashboard data to repo
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/data/accounts.json
-          git diff --staged --quiet || git commit -m "chore: update accounts drilldown data [skip ci]"
+          git add docs/data/accounts.json docs/data/summary.json
+          git diff --staged --quiet || git commit -m "chore: refresh dashboard data [skip ci]"
           git push
