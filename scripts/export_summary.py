@@ -40,22 +40,20 @@ MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun",
 # Dashboard field → ordered list of aliases to search for in the SUMMARY header.
 # Order matters: first match wins.
 COLUMN_ALIASES = {
-    "month":       ["month", "period"],
-    "gross":       ["gross eligible", "gross policies", "gross"],
-    "cancel":      ["cancellations", "cancelled", "cancel"],
-    "reject":      ["rejections", "rejected", "reject"],
-    "net":         ["net sub", "net subs", "net active", "net"],
-    "netInd":      ["net individual", "net ind", "netind"],
-    "netFam":      ["net family", "net fam", "netfam"],
-    "cumNet":      ["cumulative net", "cum net", "cumnet", "cumulative"],
-    "rev":         ["monthly revenue", "revenue", "rev"],
-    "indRev":      ["individual revenue", "ind revenue", "indrev"],
-    "famRev":      ["family revenue", "fam revenue", "famrev"],
-    "totalRevCum": ["cumulative revenue", "total revenue cum", "total rev cum",
-                    "totalrevcum", "revcum"],
-    "collected":   ["collected", "amount collected"],
-    "vwInvoice":   ["vw invoice", "vwinvoice", "invoice"],
-    "vwLock":      ["vw lock", "vwlock", "lock"],
+    "month":       ["sale month", "month"],
+    "gross":       ["gross eligible", "gross"],
+    "cancel":      ["cancellations"],
+    "reject":      ["rejections"],
+    "net":         ["net subs"],
+    "netInd":      ["net individual"],
+    "netFam":      ["net family"],
+    "cumNet":      ["cum net subs"],
+    "indRev":      ["individual revenue"],
+    "famRev":      ["family revenue"],
+    "totalRevCum": ["cumulative revenue"],
+    "collected":   ["collected revenue"],
+    "vwInvoice":   ["vw total book -invoice", "vw total book invoice"],
+    "vwLock":      ["vw billing lock"],
 }
 
 
@@ -201,10 +199,17 @@ def build_payload():
             if field == "month" or idx is None:
                 continue
             record[field] = _to_num(row[idx]) if idx < len(row) else None
+        # Skip future months that have no data yet
+        if record.get("gross") is None:
+            continue
+        # Dashboard uses `rev` = indRev + famRev (no source column for it)
+        ind = record.get("indRev") or 0
+        fam = record.get("famRev") or 0
+        record["rev"] = ind + fam if (ind or fam) else None
         months.append(record)
 
     if not months:
-        raise RuntimeError("No month rows parsed from SUMMARY")
+        raise RuntimeError(f"No month rows with data parsed from {SUMMARY_TAB}")
 
     months.sort(key=lambda m: _month_key(m["month"]))
 
