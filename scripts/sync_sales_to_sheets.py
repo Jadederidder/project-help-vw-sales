@@ -344,9 +344,11 @@ def send_email(new_count, total_file_rows, filtered_rows, filename):
         logger.warning("Email credentials not set — skipping email")
         return
 
+    recipients = [r.strip() for r in EMAIL_RECIPIENT.split(",") if r.strip()]
+
     msg = MIMEMultipart()
     msg["From"] = EMAIL_SENDER
-    msg["To"] = EMAIL_RECIPIENT
+    msg["To"] = ", ".join(recipients)
     msg["Subject"] = "VW/Audi Sales Sync — " + str(new_count) + " new rows added"
 
     body = "<html><body style='font-family:Arial,sans-serif;max-width:500px;'>"
@@ -365,8 +367,8 @@ def send_email(new_count, total_file_rows, filtered_rows, filename):
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
-    logger.info("Email sent to " + EMAIL_RECIPIENT)
+        server.sendmail(EMAIL_SENDER, recipients, msg.as_string())
+    logger.info("Email sent to " + ", ".join(recipients))
 
 
 def main():
