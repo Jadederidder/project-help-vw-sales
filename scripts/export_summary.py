@@ -121,9 +121,22 @@ def _is_month_row(val):
             and 2024 <= int(parts[1]) <= 2099)
 
 
+def _find_worksheet(sh, target):
+    wanted = _norm(target)
+    matches = [w for w in sh.worksheets() if _norm(w.title) == wanted]
+    if matches:
+        return matches[0]
+    titles = [w.title for w in sh.worksheets()]
+    raise RuntimeError(
+        f"Worksheet matching '{target}' not found. Existing tabs: {titles}"
+    )
+
+
 def build_payload():
     gc = _auth()
-    ws = gc.open_by_key(SHEET_ID).worksheet(SUMMARY_TAB)
+    sh = gc.open_by_key(SHEET_ID)
+    ws = _find_worksheet(sh, SUMMARY_TAB)
+    logger.info("Using worksheet: %r", ws.title)
     rows = ws.get_all_values()
     if not rows:
         raise RuntimeError("SUMMARY tab is empty")
