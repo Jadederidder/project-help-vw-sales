@@ -2,7 +2,7 @@ name: Sync VW Audi Sales to Google Sheets
 
 on:
   schedule:
-    - cron: "0 15 * * 1"
+    - cron: "13 15 * * 1"
 
   workflow_dispatch:
 
