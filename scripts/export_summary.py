@@ -28,7 +28,8 @@ from google.oauth2.service_account import Credentials
 logger = logging.getLogger(__name__)
 
 SHEET_ID    = "1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs"
-SUMMARY_TAB = "SUMMARY"
+SUMMARY_TAB = "DASHBOARD"
+DATA_START_ROW = 10  # 1-indexed; headers are above this
 SCOPES      = ["https://www.googleapis.com/auth/spreadsheets"]
 OUT_PATH    = Path(__file__).resolve().parent.parent / "docs" / "data" / "summary.json"
 DRY_RUN     = os.environ.get("DRY_RUN", "").lower() == "true"
@@ -121,6 +122,31 @@ def _is_month_row(val):
             and 2024 <= int(parts[1]) <= 2099)
 
 
+def _is_ym_row(val):
+    """Match 'YYYY-MM' month format used in the DASHBOARD tab."""
+    if not val:
+        return False
+    s = str(val).strip()
+    if len(s) != 7 or s[4] != "-":
+        return False
+    try:
+        y, m = int(s[:4]), int(s[5:])
+        return 2024 <= y <= 2099 and 1 <= m <= 12
+    except ValueError:
+        return False
+
+
+def _normalise_month(val):
+    """Return 'Mon YYYY' regardless of input format."""
+    s = str(val).strip()
+    if _is_month_row(s):
+        return s
+    if _is_ym_row(s):
+        y, m = int(s[:4]), int(s[5:])
+        return f"{MONTH_SHORT[m - 1]} {y}"
+    return s
+
+
 def _find_worksheet(sh, target):
     wanted = _norm(target)
     matches = [w for w in sh.worksheets() if _norm(w.title) == wanted]
@@ -139,10 +165,19 @@ def build_payload():
     logger.info("Using worksheet: %r", ws.title)
     rows = ws.get_all_values()
     if not rows:
-        raise RuntimeError("SUMMARY tab is empty")
+        raise RuntimeError(f"{SUMMARY_TAB} tab is empty")
 
-    header = rows[0]
-    logger.info("SUMMARY header: %s", header)
+    # Data starts at row DATA_START_ROW (1-indexed).
+    # Headers live in the row directly above that.
+    header_row_idx = DATA_START_ROW - 2   # zero-indexed
+    if header_row_idx < 0 or header_row_idx >= len(rows):
+        raise RuntimeError(f"Header row {header_row_idx+1} out of range")
+
+    header = rows[header_row_idx]
+    logger.info("DASHBOARD header (row %d): %s", header_row_idx + 1, header)
+    # Dump the 3 rows above data + the first data row so we can inspect layout
+    for idx in range(max(0, header_row_idx - 2), min(len(rows), DATA_START_ROW + 1)):
+        logger.info("  row %d: %s", idx + 1, rows[idx])
 
     col_idx = {f: _find_col(header, aliases) for f, aliases in COLUMN_ALIASES.items()}
     found   = {f: (header[i] if i is not None else None) for f, i in col_idx.items()}
@@ -155,13 +190,13 @@ def build_payload():
         logger.warning("Columns not found in SUMMARY (will be null in JSON): %s", missing)
 
     months = []
-    for row in rows[1:]:
+    for row in rows[DATA_START_ROW - 1:]:
         if col_idx["month"] >= len(row):
             continue
         label = row[col_idx["month"]].strip()
-        if not _is_month_row(label):
+        if not _is_month_row(label) and not _is_ym_row(label):
             continue
-        record = {"month": label}
+        record = {"month": _normalise_month(label)}
         for field, idx in col_idx.items():
             if field == "month" or idx is None:
                 continue
