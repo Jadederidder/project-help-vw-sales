@@ -14,10 +14,12 @@ Flow:
   7. Track processed Gmail Message-IDs in state/processed_emails.json
 
 Env:
-  CANCEL_EMAIL_ADDRESS       Gmail mailbox (IMAP)
-  CANCEL_EMAIL_APP_PASSWORD  Gmail app password
-  EMAIL_SENDER               sender for the summary email
-  EMAIL_PASSWORD             app password for the sender
+  CANCEL_EMAIL_ADDRESS       IMAP mailbox username — full email address (e.g. jd@projecthelp.co.za)
+  CANCEL_EMAIL_APP_PASSWORD  IMAP password for receiving mailbox — plain password from Afrihost, not a Gmail app password
+  IMAP_HOST                  IMAP host (default: depalma.aserv.co.za)
+  IMAP_PORT                  IMAP port (default: 993, SSL)
+  EMAIL_SENDER               Gmail sender for the summary email (jd@projecthelp.io)
+  EMAIL_PASSWORD             Gmail app password for the sender
   EMAIL_RECIPIENT            comma-separated recipient list
   GOOGLE_SHEETS_CREDENTIALS  service-account JSON
   DRY_RUN                    true → don't write to sheet, don't commit state,
@@ -47,8 +49,9 @@ from googleapiclient.discovery import build
 logger = logging.getLogger(__name__)
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-IMAP_HOST      = "imap.gmail.com"
-IMAP_PORT      = 993
+# Receiving mailbox lives on Afrihost, not Gmail. Override via env if needed.
+IMAP_HOST      = os.environ.get("IMAP_HOST", "depalma.aserv.co.za")
+IMAP_PORT      = int(os.environ.get("IMAP_PORT", "993"))
 SEARCH_DAYS    = 7
 SUBJECT_PREFIX = "Interface File - VAP FCO daily sold cancellations"
 CSV_ENCODING   = "cp1252"
