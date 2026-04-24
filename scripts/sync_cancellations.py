@@ -7,11 +7,11 @@ Daily VW/Audi cancellations sync.
 Flow:
   1. Fetch last-7-days email matching the cancellation subject via IMAP
   2. Open the .zip attachment, parse its .csv (cp1252 encoding)
-  3. Transform rows to our schema; derive brand + membership_type
-  4. Read the CANCELLATIONS tab header + existing contract numbers
-  5. Align new rows to the sheet's column order, dedupe by contract_number
+  3. Pass through the 36 raw CSV columns; rename ACC_NUM → ACCOUNT_NUMBER
+  4. Read the CANCELLATIONS tab header + existing account numbers
+  5. Align new rows to the sheet's column order, dedupe by ACCOUNT_NUMBER
   6. Append new rows and email a summary (Excel attached) to all recipients
-  7. Track processed Gmail Message-IDs in state/processed_emails.json
+  7. Track processed Message-IDs in state/processed_emails.json
 
 Env:
   CANCEL_EMAIL_ADDRESS       IMAP mailbox username — full email address (e.g. jd@projecthelp.co.za)
@@ -42,10 +42,6 @@ from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-import pandas as pd
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-
 logger = logging.getLogger(__name__)
 
 # ─── Config ──────────────────────────────────────────────────────────────────
@@ -66,44 +62,44 @@ DRY_RUN           = os.environ.get("DRY_RUN", "").lower() == "true"
 DIAGNOSTIC        = os.environ.get("DIAGNOSTIC", "").lower() == "true"
 DRY_RUN_RECIPIENT = "jd@projecthelp.co.za"
 
-# Schema → possible sheet column names. Normalised on both sides for matching.
-SCHEMA_ALIASES = {
-    "contract_number":    ["contract_number", "contract no", "contract",
-                           "acc_num", "account number", "account_num",
-                           "account no", "acc no"],
-    "sale_date":          ["sale_date", "sale date",
-                           "effective_date", "effective date"],
-    "cancel_date":        ["cancel_date", "cancel date",
-                           "cancellation_date", "cancellation date",
-                           "status_date"],
-    "cancel_reason_code": ["cancel_reason_code", "cancel reason code",
-                           "reason_code", "reason code"],
-    "cancel_reason_desc": ["cancel_reason_desc", "cancel reason desc",
-                           "reason_desc", "reason description",
-                           "cancellation reason", "reason"],
-    "premium_amt":        ["premium_amt", "premium", "premium amount"],
-    "membership_type":    ["membership_type", "membership type",
-                           "membership", "type"],
-    "dealer_code":        ["dealer_code", "dealer code", "dea_code"],
-    "dealer_name":        ["dealer_name", "dealer name", "dea_name", "dealer"],
-    "brand":              ["brand", "make"],
-    "vehicle_reg":        ["vehicle_reg", "vehicle registration",
-                           "registration", "reg", "old_system_accnum"],
-    "customer_id":        ["customer_id", "customer id", "id_number",
-                           "identity_number", "identity", "id"],
-    "total_collected":    ["total_collected", "total collected",
-                           "tot_premium_collected", "total premium collected"],
-    "reference_num":      ["reference_num", "reference number", "reference",
-                           "ref", "vap_reference_num"],
-    "source_file":        ["source_file", "source file", "source", "file"],
-    "processed_at":       ["processed_at", "processed at", "timestamp",
-                           "synced_at", "sync timestamp", "run date"],
+# Source CSV → output column renames. Everything else is pass-through.
+SRC_TO_OUT = {"ACC_NUM": "ACCOUNT_NUMBER"}
+
+# The 36 target columns in the order the VW sheet expects.
+CSV_COLUMNS = [
+    "FCO_CODE", "FCO_NAME", "VAP_XVCA_CODE", "VAP_XVPS_CODE", "VAP_SUP_CODE",
+    "VAP_PRODUCT_CODE", "ACCOUNT_NUMBER", "ACC_RELOAD_ACC_NUM",
+    "ACC_EXPIRY_DATE", "VAP_DIV_CODE", "VAP_EFFECTIVE_DATE",
+    "VAP_PREMIUM_AMT", "VAP_TERM_MONTHS", "VAP_STATUS_DATE",
+    "VAP_CANCEL_REASON_CODE", "VAP_CANCEL_REASON_DESC", "PAYEE_SUP_CODE",
+    "OLD_SYSTEM_ACCNUM", "VAP_PRODUCT_NAME", "VAP_SUP_PRODUCT_NAME",
+    "DEA_CODE", "DEA_NAME", "VAP_XVST_CODE", "ACC_XOPC_CODE",
+    "ACC_DATE_CLOSED", "CUS_IDENTITY_OR_REG_NUM", "VAP_CLAIM_XVCL_CODE",
+    "VAP_CLAIM_XVCL_DESC", "LPAY_AMT", "LPAY_CREATE_DATE",
+    "VAP_REFERENCE_NUM", "INSPECTION_FEE_AMT",
+    "ACC_IN_DEBT_REVIEW_CYCLE_IND", "TOT_PREMIUM_COLLECTED",
+    "VAP_XVOW_CODE", "VAP_XVAC_CODE",
+]
+
+# Parsed to ISO YYYY-MM-DD so Sheets (USER_ENTERED) treats them as dates.
+DATE_FIELDS = {
+    "ACC_EXPIRY_DATE", "VAP_EFFECTIVE_DATE", "VAP_STATUS_DATE",
+    "LPAY_CREATE_DATE", "ACC_DATE_CLOSED",
+}
+
+# Sent as numeric so Sheets sorts them correctly. Identifier columns with
+# leading zeros or letters (OLD_SYSTEM_ACCNUM, CUS_IDENTITY_OR_REG_NUM, code
+# columns) stay as strings.
+NUMERIC_FIELDS = {
+    "ACCOUNT_NUMBER", "VAP_PREMIUM_AMT", "VAP_TERM_MONTHS",
+    "DEA_CODE", "VAP_REFERENCE_NUM", "LPAY_AMT",
+    "INSPECTION_FEE_AMT", "TOT_PREMIUM_COLLECTED",
 }
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 def _norm(s):
-    """Collapse whitespace/underscores; lowercase. Both-sides of the match."""
+    """Collapse whitespace/underscores; lowercase. Both-sides of header match."""
     return "".join(str(s or "").lower().split()).replace("_", "")
 
 
@@ -114,6 +110,31 @@ def _col_letter(idx_0):
         n, rem = divmod(n - 1, 26)
         out = chr(65 + rem) + out
     return out
+
+
+def _parse_date(v):
+    """'YYYY/MM/DD' → 'YYYY-MM-DD'. Returns the raw string for anything else."""
+    s = (v or "").strip()
+    if not s:
+        return ""
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return s
+
+
+def _parse_number(v):
+    """int for integer values, float for decimals, '' for blank/unparseable."""
+    s = (v or "").strip().replace(",", "")
+    if not s:
+        return ""
+    try:
+        f = float(s)
+    except ValueError:
+        return s
+    return int(f) if f.is_integer() else f
 
 
 # ─── State file ──────────────────────────────────────────────────────────────
@@ -214,50 +235,27 @@ def parse_zip(zip_bytes, zip_name):
     return csv_name, list(reader)
 
 
-def _to_float(v):
-    try:
-        return float(str(v).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def transform_row(src, source_file, processed_at):
-    dea_name = (src.get("DEA_NAME") or "").strip()
-    brand    = "Audi" if "AUDI" in dea_name.upper() else "VW"
-
-    premium = _to_float(src.get("VAP_PREMIUM_AMT"))
-    if premium is not None and abs(premium - 89) < 0.5:
-        membership = "Single"
-    elif premium is not None and abs(premium - 159) < 0.5:
-        membership = "Family"
-    else:
-        membership = ""
-
-    def g(k):
-        return (src.get(k) or "").strip()
-
-    return {
-        "contract_number":    g("ACC_NUM"),
-        "sale_date":          g("VAP_EFFECTIVE_DATE"),
-        "cancel_date":        g("VAP_STATUS_DATE"),
-        "cancel_reason_code": g("VAP_CANCEL_REASON_CODE"),
-        "cancel_reason_desc": g("VAP_CANCEL_REASON_DESC"),
-        "premium_amt":        g("VAP_PREMIUM_AMT"),
-        "membership_type":    membership,
-        "dealer_code":        g("DEA_CODE"),
-        "dealer_name":        dea_name,
-        "brand":              brand,
-        "vehicle_reg":        g("OLD_SYSTEM_ACCNUM"),
-        "customer_id":        g("CUS_IDENTITY_OR_REG_NUM"),
-        "total_collected":    g("TOT_PREMIUM_COLLECTED"),
-        "reference_num":      g("VAP_REFERENCE_NUM"),
-        "source_file":        source_file,
-        "processed_at":       processed_at,
-    }
+def transform_row(src):
+    """Pass the 36 raw CSV columns through, renaming ACC_NUM → ACCOUNT_NUMBER.
+    Numeric/date fields are typed so Sheets sorts them correctly."""
+    out = {}
+    for src_key, val in src.items():
+        if src_key is None:
+            continue
+        key = SRC_TO_OUT.get(src_key, src_key)
+        if key in DATE_FIELDS:
+            out[key] = _parse_date(val)
+        elif key in NUMERIC_FIELDS:
+            out[key] = _parse_number(val)
+        else:
+            out[key] = (val or "").strip() if isinstance(val, str) else val
+    return out
 
 
 # ─── Google Sheets ───────────────────────────────────────────────────────────
 def get_sheets_service():
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
     creds_json = os.environ.get("GOOGLE_SHEETS_CREDENTIALS")
     if not creds_json:
         raise RuntimeError("GOOGLE_SHEETS_CREDENTIALS not set")
@@ -277,53 +275,50 @@ def read_sheet_header(service):
     return header
 
 
-def resolve_column_map(header):
-    """Returns {sheet_col_index: schema_key} for columns we recognise."""
-    out = {}
+def account_number_col_idx(header):
+    target = _norm("ACCOUNT_NUMBER")
     for i, col in enumerate(header):
-        norm_col = _norm(col)
-        for key, aliases in SCHEMA_ALIASES.items():
-            if any(_norm(a) == norm_col for a in aliases):
-                out[i] = key
-                break
-    return out
-
-
-def contract_number_col_idx(col_map):
-    for i, key in col_map.items():
-        if key == "contract_number":
+        if _norm(col) == target:
             return i
     return None
 
 
-def read_existing_contract_numbers(service, col_map):
-    idx = contract_number_col_idx(col_map)
+def read_existing_account_numbers(service, header):
+    idx = account_number_col_idx(header)
     if idx is None:
         raise RuntimeError(
-            "CANCELLATIONS tab has no column matching 'contract_number' "
-            f"(looked for any of {SCHEMA_ALIASES['contract_number']})"
+            f"{TAB_NAME} has no ACCOUNT_NUMBER column (header={header!r})"
         )
     letter = _col_letter(idx)
     res = service.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID, range=f"{TAB_NAME}!{letter}2:{letter}",
+        spreadsheetId=SHEET_ID,
+        range=f"{TAB_NAME}!{letter}2:{letter}",
+        valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
     existing = set()
     for row in res.get("values", []):
-        if row and row[0] not in (None, ""):
-            v = str(row[0]).strip()
+        if not row or row[0] in (None, ""):
+            continue
+        v = row[0]
+        if isinstance(v, float) and v.is_integer():
+            v = str(int(v))
+        else:
+            v = str(v).strip()
             if v.endswith(".0"):
                 v = v[:-2]
+        if v:
             existing.add(v)
     return existing
 
 
-def align_rows_to_sheet(rows, header, col_map):
+def align_rows_to_sheet(rows, header):
+    """Produce a 2-D list, one row per input dict, in sheet column order.
+    Unknown header columns stay blank; unknown row keys are dropped."""
+    norm_header = [_norm(c) for c in header]
     out = []
     for row in rows:
-        line = []
-        for i in range(len(header)):
-            key = col_map.get(i)
-            line.append(row.get(key, "") if key else "")
+        norm_row = {_norm(k): v for k, v in row.items()}
+        line = [norm_row.get(nh, "") for nh in norm_header]
         out.append(line)
     return out
 
@@ -341,10 +336,25 @@ def append_rows(service, aligned):
 
 
 # ─── Summary email ───────────────────────────────────────────────────────────
+def _derive_brand(dea_name):
+    return "Audi" if "AUDI" in str(dea_name or "").upper() else "VW"
+
+
+def _derive_membership(premium):
+    try:
+        p = float(premium)
+    except (TypeError, ValueError):
+        return ""
+    if abs(p - 89)  < 0.5: return "Single"
+    if abs(p - 159) < 0.5: return "Family"
+    return ""
+
+
 def build_summary_excel(new_rows):
     if not new_rows:
         return None
-    df = pd.DataFrame(new_rows)
+    import pandas as pd  # heavy — only needed when we actually build a summary
+    df = pd.DataFrame(new_rows, columns=CSV_COLUMNS)
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as w:
         df.to_excel(w, index=False, sheet_name="New Cancellations")
@@ -385,8 +395,10 @@ def send_summary_email(run_date, new_rows, emails_processed, dupes_skipped, dry_
         by_brand = {}
         by_type  = {}
         for r in new_rows:
-            by_brand[r["brand"]]           = by_brand.get(r["brand"], 0) + 1
-            by_type[r["membership_type"]]  = by_type.get(r["membership_type"], 0) + 1
+            b = _derive_brand(r.get("DEA_NAME"))
+            m = _derive_membership(r.get("VAP_PREMIUM_AMT"))
+            by_brand[b] = by_brand.get(b, 0) + 1
+            by_type[m]  = by_type.get(m, 0) + 1
         body_lines += [
             "",
             f"  By brand      : {by_brand}",
@@ -457,60 +469,56 @@ def main():
         logger.info("DIAGNOSTIC — exiting before parse / email / write.")
         return
 
-    # Parse every new email's zip
-    all_transformed    = []
-    newly_processed    = []
-    processed_at_iso   = run_date.isoformat(timespec="seconds").replace("+00:00", "Z")
+    all_transformed = []
+    newly_processed = []
 
     for m in unseen:
         try:
             csv_name, src_rows = parse_zip(m["zip_bytes"], m["zip_name"])
             logger.info("  parsed %d rows from %s / %s",
                         len(src_rows), m["zip_name"], csv_name)
-            source_tag = f"{m['zip_name']}::{csv_name}"
             for r in src_rows:
-                all_transformed.append(transform_row(r, source_tag, processed_at_iso))
+                all_transformed.append(transform_row(r))
             newly_processed.append(m["msg_id"])
         except Exception as e:
             logger.error("  failed to parse %s: %s", m["zip_name"], e)
 
     logger.info("Total CSV rows parsed: %d", len(all_transformed))
 
-    # Read sheet + dedupe
-    service = get_sheets_service()
-    header  = read_sheet_header(service)
-    col_map = resolve_column_map(header)
+    service  = get_sheets_service()
+    header   = read_sheet_header(service)
     logger.info("Sheet header (%d cols): %s", len(header), header)
 
-    unmatched = set(SCHEMA_ALIASES) - set(col_map.values())
-    if unmatched:
-        logger.warning("Schema keys with no matching sheet column: %s",
-                       sorted(unmatched))
-
-    existing = read_existing_contract_numbers(service, col_map)
-    logger.info("Existing contract_numbers in sheet: %d", len(existing))
+    existing = read_existing_account_numbers(service, header)
+    logger.info("Existing ACCOUNT_NUMBERs in sheet: %d", len(existing))
 
     new_rows   = []
     dupes      = 0
-    blank_cn   = 0
+    blank_acc  = 0
     for row in all_transformed:
-        cn = row["contract_number"]
-        if not cn:
-            blank_cn += 1
+        acc = row.get("ACCOUNT_NUMBER")
+        if isinstance(acc, float) and acc.is_integer():
+            acc_str = str(int(acc))
+        elif acc not in (None, ""):
+            acc_str = str(acc).strip()
+        else:
+            acc_str = ""
+        if not acc_str:
+            blank_acc += 1
             continue
-        if cn in existing:
+        if acc_str in existing:
             dupes += 1
             continue
         new_rows.append(row)
-        existing.add(cn)   # dedupe within this batch too
+        existing.add(acc_str)
 
-    logger.info("Dedupe: %d new | %d already in sheet | %d blank contract_number",
-                len(new_rows), dupes, blank_cn)
+    logger.info("Dedupe: %d new | %d already in sheet | %d blank ACCOUNT_NUMBER",
+                len(new_rows), dupes, blank_acc)
 
     if DRY_RUN:
         logger.info("DRY RUN — skipping sheet append and state update")
     elif new_rows:
-        aligned = align_rows_to_sheet(new_rows, header, col_map)
+        aligned = align_rows_to_sheet(new_rows, header)
         append_rows(service, aligned)
         logger.info("Appended %d rows to %s", len(aligned), TAB_NAME)
 
