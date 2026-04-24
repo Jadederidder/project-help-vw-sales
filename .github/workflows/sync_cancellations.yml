@@ -1,0 +1,69 @@
+name: Daily VW/Audi Cancellations Sync
+
+on:
+  schedule:
+    # 01:17 SAST = 23:17 UTC. :17 offset avoids top-of-hour GitHub cron pileup.
+    - cron: "17 23 * * *"
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — parse only, no sheet write, no state commit, email jd only"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      diagnostic:
+        description: "Diagnostic — list matching emails and exit; no parse / email / write"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync cancellations from email
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run cancellations sync
+        env:
+          CANCEL_EMAIL_ADDRESS:      ${{ secrets.CANCEL_EMAIL_ADDRESS }}
+          CANCEL_EMAIL_APP_PASSWORD: ${{ secrets.CANCEL_EMAIL_APP_PASSWORD }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
+          DIAGNOSTIC:                ${{ github.event.inputs.diagnostic || 'false' }}
+        run: python scripts/sync_cancellations.py
+
+      - name: Commit processed-emails state
+        if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.diagnostic != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/processed_emails.json
+          git diff --staged --quiet || git commit -m "chore: update processed cancellation emails state"
+          git push
