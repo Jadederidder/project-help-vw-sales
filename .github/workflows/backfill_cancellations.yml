@@ -1,0 +1,48 @@
+name: One-off CANCELLATIONS Back-fill
+
+# One-off back-fill for rows 227–230, which were appended half-empty before
+# the 36-column schema fix. Re-parses scripts/fixtures/sample_cancellations.csv,
+# matches rows by ACCOUNT_NUMBER, and fills only the blank cells — never
+# overwrites. No schedule: manual trigger only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — print planned updates without writing. Default TRUE for safety."
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    name: Back-fill CANCELLATIONS rows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run back-fill
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+          DRY_RUN:                   ${{ github.event.inputs.dry_run }}
+        run: python scripts/backfill_cancellations.py
