@@ -1,0 +1,52 @@
+name: VW Casi Cancellations
+
+on:
+  schedule:
+    # 23:47 UTC = 01:47 SAST — 30 min after sync_cancellations.yml (23:17 UTC).
+    - cron: "47 23 * * *"
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — no Casi calls, no sheet writes, no live email"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  cancel:
+    name: Cancel Wesbank VW/Audi clients in Casi
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run cancel script
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          CASI_CLIENT_SECRET:        ${{ secrets.CASI_CLIENT_SECRET }}
+          CASI_USERNAME:             ${{ secrets.CASI_USERNAME }}
+          CASI_PASSWORD:             ${{ secrets.CASI_PASSWORD }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           "jd@projecthelp.io"
+          DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
+        run: python scripts/cancel_casi_revio.py
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::error::cancel_casi_revio FAILED — check the logs above."
