@@ -38,6 +38,7 @@ from googleapiclient.discovery import build
 # ─── Constants ───────────────────────────────────────────────────────────────
 SHEET_ID = "1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs"
 TAB = "CANCELLATIONS"
+SALES_TAB_CANDIDATES = ["SALES", "Sales", "VW Sales"]
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 CASI_BASE = "https://casi-live.liv.ninja/api/v1"
@@ -52,6 +53,8 @@ CANCEL_REASONS = {
     "VAP LOADED IN ERROR",
 }
 
+# Headers we expect on the CANCELLATIONS tab. Phone is NOT here — it lives in
+# the SALES tab and is looked up via account_number / id_number.
 HEADER_VARIANTS = {
     "processed_date": ["processed date", "processed_date"],
     "revio_status":   ["revio status", "revio_status"],
@@ -59,19 +62,27 @@ HEADER_VARIANTS = {
     "notes":          ["notes", "note"],
     "reason":         ["vap_cancel_reason_desc", "vap cancel reason desc"],
     "id_number":      ["cus_identity_or_reg_num", "id_number", "id number", "id"],
-    "phone":          ["phone", "phone_number", "phone number",
-                       "cellphone", "cell_phone", "cell phone",
-                       "cell", "mobile", "cellnumber", "cell_number", "cell number"],
     "dea_name":       ["dea_name", "dea name"],
     "account_number": ["account_number", "account number"],
 }
 
-# Phone is REQUIRED — without it the script can do nothing useful.
 REQUIRED_FIELDS = {
     "processed_date", "casi_status", "notes",
-    "reason", "phone", "dea_name", "account_number",
+    "reason", "dea_name", "account_number",
 }
 OPTIONAL_FIELDS = {"revio_status", "id_number"}
+
+# SALES tab — source of truth for phones. Headers per sync_sales_to_sheets.py:
+#   col F = "phone_number"
+#   col V = "account number"  (lowercase, with space)
+#   col Y = "IDENTITY_OR_REG_NUM"
+SALES_HEADER_VARIANTS = {
+    "account_number": ["account number", "account_number", "accountnumber"],
+    "id_number":      ["identity_or_reg_num", "identity or reg num",
+                       "id_number", "id number"],
+    "phone":          ["phone_number", "phone number", "phonenumber",
+                       "phone", "cellphone", "mobile"],
+}
 
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 DRY_RUN_RECIPIENT = "jd@projecthelp.co.za"
@@ -103,30 +114,38 @@ def _quote_tab(name):
 
 def normalize_phone(raw):
     """Normalise to '27XXXXXXXXX' (11 digits, ZA international format).
-    Returns '' for unrecoverable inputs."""
+    Returns '' for unrecoverable inputs.
+
+      "27821234567"  → "27821234567"
+      "0821234567"   → "27821234567"
+      "+27 82 123 4567" → "27821234567"
+       821234567 (int / lost leading 0) → "27821234567"
+      "821234567.0" (numeric Sheets cell) → "27821234567"
+    """
     if raw is None:
         return ""
-    s = re.sub(r"[\s\-+()]", "", str(raw).strip())
-    # Some sheets store phones as numbers and lose the leading 0.
+    if isinstance(raw, float) and raw.is_integer():
+        raw = int(raw)
+    s = str(raw).strip()
     if s.endswith(".0"):
         s = s[:-2]
-    if not s or not s.isdigit():
+    s = re.sub(r"\D", "", s)
+    if not s:
         return ""
-    if len(s) == 10 and s.startswith("0"):
-        return "27" + s[1:]
-    if len(s) == 9:                   # leading zero already dropped
-        return "27" + s
     if len(s) == 11 and s.startswith("27"):
         return s
+    if len(s) == 10 and s.startswith("0"):
+        return "27" + s[1:]
+    if len(s) == 9:                       # leading zero already dropped
+        return "27" + s
     return ""
 
 
-def bind_columns(headers):
-    """Return {logical_field: column_index_or_None} for every key in
-    HEADER_VARIANTS, using normalised matching."""
+def _bind_with_variants(headers, variant_map):
+    """Generic header-to-logical-field binder used by both tabs."""
     norm_headers = {_norm(h): i for i, h in enumerate(headers)}
     bindings = {}
-    for key, variants in HEADER_VARIANTS.items():
+    for key, variants in variant_map.items():
         idx = None
         for v in variants:
             if _norm(v) in norm_headers:
@@ -134,6 +153,52 @@ def bind_columns(headers):
                 break
         bindings[key] = idx
     return bindings
+
+
+def bind_columns(headers):
+    """CANCELLATIONS-tab header binder."""
+    return _bind_with_variants(headers, HEADER_VARIANTS)
+
+
+def build_sales_phone_map(headers, rows):
+    """Pure function: from SALES headers + data rows, build phone-lookup maps.
+    Returns {'by_account': dict, 'by_id': dict, 'rows': N}.
+    Skips SALES rows with a blank phone, and skips per-key entries with a
+    blank account/id (the other key still gets indexed if present).
+    Raises RuntimeError if SALES is missing any of the three required columns."""
+    b = _bind_with_variants(headers, SALES_HEADER_VARIANTS)
+    missing = sorted(k for k, idx in b.items() if idx is None)
+    if missing:
+        raise RuntimeError(
+            f"SALES tab missing required column(s): {missing}; headers={headers}"
+        )
+    acct_idx, id_idx, phone_idx = b["account_number"], b["id_number"], b["phone"]
+    by_account, by_id = {}, {}
+    for row in rows:
+        def cell(i):
+            return str(row[i]).strip() if i < len(row) and row[i] is not None else ""
+        phone = cell(phone_idx)
+        if not phone:
+            continue
+        acct = cell(acct_idx)
+        if acct:
+            by_account[acct] = phone
+        sa_id = cell(id_idx)
+        if sa_id:
+            by_id[sa_id] = phone
+    return {"by_account": by_account, "by_id": by_id, "rows": len(rows)}
+
+
+def lookup_phone(maps, account_number, id_number):
+    """Returns (raw_phone, source_tag) — source is 'account_number',
+    'id_number', or None if neither key matches."""
+    acct = str(account_number or "").strip()
+    if acct and acct in maps["by_account"]:
+        return (maps["by_account"][acct], "account_number")
+    sa_id = str(id_number or "").strip()
+    if sa_id and sa_id in maps["by_id"]:
+        return (maps["by_id"][sa_id], "id_number")
+    return (None, None)
 
 
 def decide_action(reason):
@@ -165,6 +230,28 @@ def _get_sheets():
         raise RuntimeError("GOOGLE_SHEETS_CREDENTIALS env var not set")
     creds = Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES)
     return build("sheets", "v4", credentials=creds)
+
+
+def load_sales_phone_map(svc):
+    """Read the SALES tab from the live sheet, return phone-lookup maps.
+    Tries SALES_TAB_CANDIDATES in order — first one that exists wins."""
+    last_err = None
+    for tab in SALES_TAB_CANDIDATES:
+        try:
+            res = svc.spreadsheets().values().get(
+                spreadsheetId=SHEET_ID,
+                range=f"'{_quote_tab(tab)}'!A1:ZZ",
+                valueRenderOption="UNFORMATTED_VALUE",
+            ).execute()
+            values = res.get("values", [])
+            if values:
+                logger.info(f"Loaded SALES tab from {tab!r}")
+                return build_sales_phone_map(values[0], values[1:])
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(
+        f"Could not load any of {SALES_TAB_CANDIDATES} as the SALES tab: {last_err}"
+    )
 
 
 def write_row_status(svc, row_num, bindings,
@@ -269,8 +356,12 @@ def send_summary_email(stats, rows_detail, dry_run):
         f'<b>Examined:</b> {stats["examined"]}<br>'
         f'<b>Already processed (skipped):</b> {stats["already_processed"]}<br>'
         f'<b>Cancelled (incl. Not-found):</b> {stats["cancelled"]}<br>'
-        f'<b>Skipped — unknown reason:</b> {stats["skipped"]}<br>'
-        f'<b>No phone available:</b> {stats["no_phone"]}<br>'
+        f'<b>Skipped — unknown reason:</b> '
+        f'{stats["skipped"] - stats["no_phone"] - stats["phone_invalid"]}<br>'
+        f'<b>No phone in Sales:</b> {stats["no_phone"]}<br>'
+        f'<b>Phone format invalid:</b> {stats["phone_invalid"]}<br>'
+        f'<b>Phone via account#:</b> {stats["phone_via_account_number"]}<br>'
+        f'<b>Phone via id#:</b> {stats["phone_via_id_number"]}<br>'
         f'<b>Errors:</b> {stats["errors"]}'
         f'</p>'
         f'<table border="1" cellpadding="6" cellspacing="0" '
@@ -296,25 +387,30 @@ def send_summary_email(stats, rows_detail, dry_run):
 
 
 # ─── Main row loop ───────────────────────────────────────────────────────────
-def process_rows(svc, rows, bindings):
+def process_rows(svc, rows, bindings, phone_maps):
     """Mutates the sheet via writes unless DRY_RUN is set. Returns (stats, detail)."""
     stats = {"examined": 0, "already_processed": 0, "cancelled": 0,
-             "skipped": 0, "errors": 0, "no_phone": 0}
+             "skipped": 0, "errors": 0,
+             "no_phone": 0, "phone_invalid": 0,
+             "phone_via_account_number": 0, "phone_via_id_number": 0}
     detail = []
 
     pd_idx = bindings["processed_date"]
     reason_idx = bindings["reason"]
-    phone_idx = bindings["phone"]
     dea_idx = bindings["dea_name"]
     acct_idx = bindings["account_number"]
+    id_idx = bindings.get("id_number")     # optional
 
     def cell(row, idx):
         return row[idx] if idx is not None and idx < len(row) else ""
+
+    matches_logged = 0   # for the "first 3 phone matches" preflight log
 
     for offset, row in enumerate(rows):
         row_num = offset + 2  # 1-indexed; +1 for header row
         stats["examined"] += 1
         account = str(cell(row, acct_idx)).strip()
+        sa_id = str(cell(row, id_idx)).strip() if id_idx is not None else ""
 
         try:
             if str(cell(row, pd_idx)).strip():
@@ -339,29 +435,55 @@ def process_rows(svc, rows, bindings):
                                      _now_str(), "Skipped — not processed", note)
                 continue
 
-            phone_raw = str(cell(row, phone_idx)).strip()
-            phone = normalize_phone(phone_raw)
-            if not phone:
+            # SALES-tab phone lookup
+            raw_phone, source = lookup_phone(phone_maps, account, sa_id)
+            if raw_phone is None:
                 stats["no_phone"] += 1
                 stats["skipped"] += 1
+                msg = "No phone — not found in Sales"
                 detail.append({
                     "account": account, "reason": reason or "(blank)",
-                    "cover": cover_label(cover_id), "status": "No phone available",
-                    "notes": f"Raw phone: '{phone_raw}'",
+                    "cover": cover_label(cover_id), "status": msg,
+                    "notes": f"acct={account!r} id={sa_id!r}",
                 })
-                logger.warning(f"  row {row_num} acct={account}  no phone "
-                               f"(raw {phone_raw!r})")
+                logger.warning(f"  row {row_num} acct={account} id={sa_id!r}  "
+                               "no phone in Sales (account or id)")
                 if not DRY_RUN:
-                    write_row_status(svc, row_num, bindings,
-                                     _now_str(), "No phone available",
-                                     f"Raw phone: '{phone_raw}'")
+                    write_row_status(svc, row_num, bindings, _now_str(), msg,
+                                     f"acct={account!r} id={sa_id!r}")
                 continue
+
+            phone = normalize_phone(raw_phone)
+            if not phone:
+                stats["phone_invalid"] += 1
+                stats["skipped"] += 1
+                msg = f"Phone format invalid: {raw_phone!r}"
+                detail.append({
+                    "account": account, "reason": reason or "(blank)",
+                    "cover": cover_label(cover_id), "status": msg,
+                    "notes": f"source={source}",
+                })
+                logger.warning(f"  row {row_num} acct={account}  phone "
+                               f"{raw_phone!r} (source={source}) is malformed")
+                if not DRY_RUN:
+                    write_row_status(svc, row_num, bindings, _now_str(), msg,
+                                     f"source={source}")
+                continue
+
+            stats[f"phone_via_{source}"] += 1
+
+            # First 3 matches: log raw + normalised so JD can spot-check
+            if matches_logged < 3:
+                logger.info(f"  [phone match {matches_logged + 1}/3] "
+                            f"row {row_num} acct={account}  source={source}  "
+                            f"raw={raw_phone!r}  normalised={phone!r}")
+                matches_logged += 1
 
             if DRY_RUN:
                 detail.append({
                     "account": account, "reason": reason or "(blank)",
                     "cover": cover_label(cover_id), "status": "(would cancel)",
-                    "notes": f"phone={phone}",
+                    "notes": f"phone={phone} (via {source})",
                 })
                 logger.info(f"  row {row_num} acct={account}  DRY-RUN cancel "
                             f"cover={cover_label(cover_id)} phone={phone}")
@@ -382,12 +504,13 @@ def process_rows(svc, rows, bindings):
             detail.append({
                 "account": account, "reason": reason or "(blank)",
                 "cover": cover_label(cover_id), "status": sheet_status,
-                "notes": casi_detail,
+                "notes": f"{casi_detail} (phone via {source})",
             })
             logger.info(f"  row {row_num} acct={account}  {sheet_status}  "
-                        f"cover={cover_label(cover_id)} phone={phone}")
-            write_row_status(svc, row_num, bindings,
-                             _now_str(), sheet_status, casi_detail)
+                        f"cover={cover_label(cover_id)} phone={phone} "
+                        f"(via {source})")
+            write_row_status(svc, row_num, bindings, _now_str(), sheet_status,
+                             f"{casi_detail} (phone via {source})")
 
         except Exception as e:
             stats["errors"] += 1
@@ -414,10 +537,13 @@ def main():
     logger.info("=" * 60)
 
     svc = _get_sheets()
+    # UNFORMATTED_VALUE returns raw values: a numeric account_number stored as
+    # a number returns as int 87028413213 (str() yields "87028413213") rather
+    # than "8,7E+10" which FORMATTED_VALUE gives for cells in scientific notation.
     res = svc.spreadsheets().values().get(
         spreadsheetId=SHEET_ID,
         range=f"'{_quote_tab(TAB)}'!A1:ZZ",
-        valueRenderOption="FORMATTED_VALUE",
+        valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
     values = res.get("values", [])
     if not values:
@@ -444,24 +570,30 @@ def main():
     if missing_required:
         logger.error(f"Missing required column(s): {missing_required}")
         logger.error("Add them to the CANCELLATIONS tab and re-run.")
-        if "phone" in missing_required:
-            logger.error("Phone column is missing entirely — the script cannot do "
-                         "anything useful without it. Add a phone column or extract "
-                         "phones from another source first.")
         sys.exit(3)
     missing_optional = sorted(k for k in OPTIONAL_FIELDS if bindings.get(k) is None)
     if missing_optional:
         logger.warning(f"Optional columns not found (proceeding without): {missing_optional}")
 
-    stats, detail = process_rows(svc, rows, bindings)
+    # Load SALES tab and build phone-lookup map
+    phone_maps = load_sales_phone_map(svc)
+    logger.info(f"Loaded {phone_maps['rows']} rows from SALES tab")
+    logger.info(f"Built phone-lookup map: account_number={len(phone_maps['by_account'])} "
+                f"entries, id_number={len(phone_maps['by_id'])} entries")
+    logger.info("─" * 60)
+
+    stats, detail = process_rows(svc, rows, bindings, phone_maps)
 
     logger.info("=" * 60)
-    logger.info(f"Examined            : {stats['examined']}")
-    logger.info(f"  Already processed : {stats['already_processed']}")
-    logger.info(f"  Cancelled         : {stats['cancelled']}")
-    logger.info(f"  Skipped           : {stats['skipped']}")
-    logger.info(f"  No phone          : {stats['no_phone']}")
-    logger.info(f"  Errors            : {stats['errors']}")
+    logger.info(f"Examined              : {stats['examined']}")
+    logger.info(f"  Already processed   : {stats['already_processed']}")
+    logger.info(f"  Cancelled           : {stats['cancelled']}")
+    logger.info(f"  Skipped (unknown)   : {stats['skipped'] - stats['no_phone'] - stats['phone_invalid']}")
+    logger.info(f"  No phone in Sales   : {stats['no_phone']}")
+    logger.info(f"  Phone format invalid: {stats['phone_invalid']}")
+    logger.info(f"  Phone via account#  : {stats['phone_via_account_number']}")
+    logger.info(f"  Phone via id#       : {stats['phone_via_id_number']}")
+    logger.info(f"  Errors              : {stats['errors']}")
     logger.info("=" * 60)
 
     send_summary_email(stats, detail, dry_run=DRY_RUN)
