@@ -1,0 +1,48 @@
+name: Daily VW/Audi Rejections Sync
+
+on:
+  schedule:
+    # 01:32 SAST = 23:32 UTC. Sits between sync_cancellations (23:17 UTC)
+    # and cancel_casi_revio (23:47 UTC).
+    - cron: "32 23 * * *"
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — parse only, no sheet write, email jd only"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync rejections from email
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run rejections sync
+        env:
+          CANCEL_EMAIL_ADDRESS:      ${{ secrets.CANCEL_EMAIL_ADDRESS }}
+          CANCEL_EMAIL_APP_PASSWORD: ${{ secrets.CANCEL_EMAIL_APP_PASSWORD }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
+        run: python scripts/sync_rejections.py
