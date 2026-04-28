@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 # ============================================================
 # scripts/sync_sales_to_sheets.py
-# Runs every Monday at 5pm
-# 1. Connects to SFTP, downloads latest VW_Audi EOD file
-# 2. Filters rows from last 14 days only
-# 3. Deduplicates against existing sheet data by WesBank account number
-# 4. Appends only NEW rows to Google Sheet SALES tab
-# 5. Emails confirmation report
+# Runs every Monday at 17:13 SAST.
+# Raw-SFTP passthrough — no column transformation. The SALES tab in the
+# VW Reporting Master Book mirrors the Wesbank EOD file's column order
+# and header text exactly. This script only:
+#   1. Pulls the latest VW_Audi EOD .xlsx from SFTP.
+#   2. Reads the SALES header to bind WesBank Account Number (dedupe key),
+#      Created Time (sort key), and a few preview-only columns.
+#   3. Filters SFTP rows down to those whose account number is NOT in
+#      the dedupe set built from SALES col Y.
+#   4. (Live) formats SALES col Y as TEXT, appends new rows in the same
+#      column order as the live header, sorts the data range by Created
+#      Time ascending, emails a summary.
+#   5. (Dry-run) logs the same plan plus a 5-row preview and emails a
+#      [DRY RUN] heartbeat to jd only — no writes, no Casi-style sort.
 # ============================================================
 
-import os
-import sys
-import logging
-import smtplib
 import io
 import json
-from datetime import datetime, timedelta, timezone
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import logging
+import os
+import re
+import smtplib
+import sys
+from datetime import datetime
+from email.message import EmailMessage
 
 import paramiko
 import pandas as pd
@@ -31,387 +39,485 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ─── Config ──────────────────────────────────────────────────────────────────
 SFTP_HOST     = "eu-west-1.sftpcloud.io"
 SFTP_PORT     = 22
 SFTP_USER     = "projecthelp@projecthelp.co.za"
 SFTP_PASSWORD = os.environ.get("SFTP_PASSWORD", "")
+SFTP_FOLDER   = "ProjectHelp/VW & Audi Sales"
 
-SHEET_ID      = "1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs"
-SHEET_TAB     = "SALES"
-SHEET_SCOPES  = ["https://www.googleapis.com/auth/spreadsheets"]
+SHEET_ID = "1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs"
+SHEET_TAB = "SALES"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 EMAIL_SENDER    = os.environ.get("EMAIL_SENDER", "")
 EMAIL_PASSWORD  = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", "")
+DRY_RUN_RECIPIENT = "jd@projecthelp.co.za"
 
-LOOKBACK_DAYS = 14
+DRY_RUN = os.environ.get("DRY_RUN", "").lower() == "true"
 
-# Google Sheet column order — must match exactly
-SHEET_HEADERS = [
-    "call_date",        # A - Created Time
-    "status",           # B - BLANK
-    "user",             # C - BLANK
-    "full_name",        # D - FirstName + Surname
-    "brand",            # E - Manufacturer (VOLKSWAGEN/AUDI etc)
-    "phone_number",     # F - Mobile Number
-    "title",            # G - Title
-    "first_name",       # H - FirstName
-    "middle_initial",   # I - BLANK
-    "last_name",        # J - Surname
-    "address1",         # K - Physical Line1
-    "address2",         # L - Physical Line2
-    "address3",         # M - Physical Suburb
-    "city",             # N - Physical City
-    "state",            # O - BLANK
-    "province",         # P - Physical Province
-    "postal_code",      # Q - Physical Post Code
-    "alt_phone",        # R - BLANK
-    "email",            # S - Email Address
-    "lead_id",          # T - VICI Lead ID
-    "status_name",      # U - "SALE Premium Help" (hardcoded)
-    "account number",   # V - WesBank Account Number (starts with 87)
-    "CUSTOMER_NUMBER",  # W - Customer Number
-    "CUST_TYPE_CODE",   # X - CUST_TYPE_CODE
-    "IDENTITY_OR_REG_NUM", # Y - ID Number
-    "BANK_NAME",        # Z - Bank
-    "BANK_ACC_NUM",     # AA - Bank Account Number
-    "BANK_BRANCH_CODE", # AB - Branch Code
-    "VEHICLE_ID_NUM",   # AC - VEHICLE_ID_NUM
-    "REGISTRATION_NUM", # AD - REGISTRATION_NUM
-    "CHASSIS_NUM",      # AE - CHASSIS_NUM
-    "ASSET_SHORT_DESCRIPTION", # AF
-    "MM_MAKE_DESCRIPTION",     # AG - Manufacturer
-    "MM_MODEL_DESCRIPTION",    # AH - Model
-    "DATE_FIRST_LICENSED",     # AI - Date First Licensed
-    "OPEN_DATE",               # AJ - Open Date
-    "DATE_EXPIRY",             # AK - Expiry Date
-    "CUST_TYPE_DESC",          # AL - CUST_TYPE_DESC
-    "snapshot_date",           # AM - Snap Date
-]
+# Defensive header variants for cols we *must* bind. _norm collapses
+# whitespace + underscores + slashes and lowercases, so e.g.
+# "WesBank Account Number" / "WesBank_Account_Number" / "wesbank account number"
+# all collapse to the same string.
+HEADER_VARIANTS = {
+    "account":      ["WesBank Account Number", "Wesbank Account Number",
+                     "Account Number", "account number"],
+    "created_time": ["Created Time (VW/Audi Campaign 1)", "Created Time"],
+    "manufacturer": ["Manufacturer"],
+    "first_name":   ["FirstName", "First Name"],
+    "last_name":    ["Surname", "Last Name"],
+}
 
 
+# ─── Pure helpers ────────────────────────────────────────────────────────────
+def _norm(s):
+    return re.sub(r"[\s_/]", "", str(s or "").lower())
+
+
+def _col_letter(idx_0):
+    n = idx_0 + 1
+    out = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def _norm_account(v):
+    """Strip non-digits — defeats scientific notation, .0 suffixes,
+    whitespace, and any other formatting quirks. JD's safety req."""
+    if v is None or v == "":
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return re.sub(r"\D", "", s)
+
+
+def find_col(header, variants):
+    """Return the 0-based index of the first variant that matches a header
+    cell, or None."""
+    norm_to_idx = {_norm(h): i for i, h in enumerate(header) if h}
+    for v in variants:
+        idx = norm_to_idx.get(_norm(v))
+        if idx is not None:
+            return idx
+    return None
+
+
+def bind_columns(header):
+    """Returns {logical: idx_or_None}. Critical fields fail loud later if None."""
+    return {key: find_col(header, variants)
+            for key, variants in HEADER_VARIANTS.items()}
+
+
+def _format_cell(val):
+    """Coerce a pandas cell value into something Sheets API will accept as
+    text (with valueInputOption='RAW')."""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(val, "strftime"):
+        return val.strftime("%Y-%m-%d %H:%M:%S")
+    s = str(val) if val is not None else ""
+    return "" if s in ("nan", "NaT", "None") else s
+
+
+def align_row_to_header(row, header):
+    """Build a list aligned to the live SALES header order. Each cell is
+    the row's value for that header (or empty if absent)."""
+    out = []
+    for h in header:
+        if not h:
+            out.append("")
+            continue
+        out.append(_format_cell(row.get(h, "")))
+    return out
+
+
+# ─── SFTP ────────────────────────────────────────────────────────────────────
 def get_sftp_client():
-    logger.info("Connecting to SFTP...")
+    logger.info("Connecting to SFTP %s as %s", SFTP_HOST, SFTP_USER)
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASSWORD)
-    sftp = ssh.open_sftp()
-    logger.info("SFTP connected")
-    return ssh, sftp
+    return ssh, ssh.open_sftp()
 
 
 def find_latest_file(sftp):
-    """Find the latest VW_Audi EOD file in ProjectHelp/VW & Audi Sales."""
-    folder = "ProjectHelp/VW & Audi Sales"
-    files = sftp.listdir(folder)
-    xlsx_files = sorted([f for f in files if f.endswith(".xlsx") and "VW_Audi" in f])
-    if not xlsx_files:
-        raise RuntimeError("No VW_Audi files found in " + folder)
-    latest = xlsx_files[-1]
-    logger.info("Latest file: " + latest)
-    return folder, latest
+    files = sftp.listdir(SFTP_FOLDER)
+    xlsx = sorted(f for f in files if f.endswith(".xlsx") and "VW_Audi" in f)
+    if not xlsx:
+        raise RuntimeError(f"No VW_Audi *.xlsx in {SFTP_FOLDER}")
+    latest = xlsx[-1]
+    logger.info("Latest SFTP file: %s", latest)
+    return latest
 
 
-def download_file(sftp, folder, filename):
-    remote_path = folder + "/" + filename
-    logger.info("Downloading: " + remote_path)
+def download_file(sftp, filename):
     buf = io.BytesIO()
-    sftp.getfo(remote_path, buf)
+    sftp.getfo(f"{SFTP_FOLDER}/{filename}", buf)
     buf.seek(0)
     return buf
 
 
-def parse_and_map(buf):
-    """Parse SFTP file and map to Google Sheet columns."""
-    df = pd.read_excel(buf)
-    logger.info("Total rows in file: " + str(len(df)))
-
-    mapped = pd.DataFrame()
-
-    # A: call_date — Created Time
-    mapped["call_date"] = pd.to_datetime(
-        df.get("Created Time (VW/Audi Campaign 1)"), errors="coerce"
-    )
-
-    # B: status — BLANK
-    mapped["status"] = ""
-
-    # C: user — BLANK
-    mapped["user"] = ""
-
-    # D: full_name — FirstName + Surname
-    mapped["full_name"] = (
-        df.get("FirstName", "").fillna("").astype(str) + " " +
-        df.get("Surname", "").fillna("").astype(str)
-    ).str.strip()
-
-    # E: brand — Manufacturer (VOLKSWAGEN/AUDI/CHERY/SUZUKI etc)
-    mapped["brand"] = df.get("Manufacturer", "").fillna("").astype(str).str.upper()
-
-    # F: phone_number
-    mapped["phone_number"] = df.get("Mobile Number (VW/Audi Campaign 1)", "").fillna("").astype(str)
-
-    # G: title
-    mapped["title"] = df.get("Title (VW/Audi Campaign 1)", "").fillna("").astype(str)
-
-    # H: first_name
-    mapped["first_name"] = df.get("FirstName", "").fillna("").astype(str)
-
-    # I: middle_initial — BLANK
-    mapped["middle_initial"] = ""
-
-    # J: last_name
-    mapped["last_name"] = df.get("Surname", "").fillna("").astype(str)
-
-    # K: address1
-    mapped["address1"] = df.get("Physical Line1", "").fillna("").astype(str)
-
-    # L: address2
-    mapped["address2"] = df.get("Physical Line2", "").fillna("").astype(str)
-
-    # M: address3 — suburb
-    mapped["address3"] = df.get("Physical Suburb", "").fillna("").astype(str)
-
-    # N: city
-    mapped["city"] = df.get("Physical City", "").fillna("").astype(str)
-
-    # O: state — BLANK
-    mapped["state"] = ""
-
-    # P: province
-    mapped["province"] = df.get("Physical Province", "").fillna("").astype(str)
-
-    # Q: postal_code
-    mapped["postal_code"] = df.get("Physical Post Code", "").fillna("").astype(str)
-
-    # R: alt_phone — BLANK
-    mapped["alt_phone"] = ""
-
-    # S: email
-    mapped["email"] = df.get("Email Address (VW/Audi Campaign 1)", "").fillna("").astype(str)
-
-    # T: lead_id — VICI Lead ID
-    mapped["lead_id"] = df.get("VICI Lead ID", "").fillna("").astype(str)
-
-    # U: status_name — hardcoded
-    mapped["status_name"] = "SALE Premium Help"
-
-    # V: account number — WesBank Account Number (starts with 87) — MOST IMPORTANT
-    def clean_account(val):
-        s = str(val).strip()
-        if s.endswith(".0"):
-            s = s[:-2]
-        return s.strip()
-
-    mapped["account number"] = df.get("WesBank Account Number", "").fillna("").apply(clean_account)
-
-    # W: CUSTOMER_NUMBER
-    mapped["CUSTOMER_NUMBER"] = df.get("Customer Number", "").fillna("").astype(str)
-
-    # X: CUST_TYPE_CODE
-    mapped["CUST_TYPE_CODE"] = df.get("CUST_TYPE_CODE", "").fillna("").astype(str)
-
-    # Y: IDENTITY_OR_REG_NUM
-    mapped["IDENTITY_OR_REG_NUM"] = df.get("ID Number", "").fillna("").astype(str)
-
-    # Z: BANK_NAME
-    mapped["BANK_NAME"] = df.get("Bank", "").fillna("").astype(str)
-
-    # AA: BANK_ACC_NUM
-    mapped["BANK_ACC_NUM"] = df.get("Bank Account Number (VW/Audi)", "").fillna("").astype(str)
-
-    # AB: BANK_BRANCH_CODE
-    mapped["BANK_BRANCH_CODE"] = df.get("Branch Code (VW/Audi Campaign 1)", "").fillna("").astype(str)
-
-    # AC: VEHICLE_ID_NUM
-    mapped["VEHICLE_ID_NUM"] = df.get("VEHICLE_ID_NUM", "").fillna("").astype(str)
-
-    # AD: REGISTRATION_NUM
-    mapped["REGISTRATION_NUM"] = df.get("REGISTRATION_NUM", "").fillna("").astype(str)
-
-    # AE: CHASSIS_NUM
-    mapped["CHASSIS_NUM"] = df.get("CHASSIS_NUM", "").fillna("").astype(str)
-
-    # AF: ASSET_SHORT_DESCRIPTION
-    mapped["ASSET_SHORT_DESCRIPTION"] = df.get("ASSET_SHORT_DESCRIPTION", "").fillna("").astype(str)
-
-    # AG: MM_MAKE_DESCRIPTION — Manufacturer
-    mapped["MM_MAKE_DESCRIPTION"] = df.get("Manufacturer", "").fillna("").astype(str)
-
-    # AH: MM_MODEL_DESCRIPTION — Model
-    mapped["MM_MODEL_DESCRIPTION"] = df.get("Model", "").fillna("").astype(str)
-
-    # AI: DATE_FIRST_LICENSED
-    mapped["DATE_FIRST_LICENSED"] = df.get("Date First Licensed", "").fillna("").astype(str)
-
-    # AJ: OPEN_DATE
-    mapped["OPEN_DATE"] = df.get("Open Date", "").fillna("").astype(str)
-
-    # AK: DATE_EXPIRY
-    mapped["DATE_EXPIRY"] = df.get("Expiry Date", "").fillna("").astype(str)
-
-    # AL: CUST_TYPE_DESC
-    mapped["CUST_TYPE_DESC"] = df.get("CUST_TYPE_DESC", "").fillna("").astype(str)
-
-    # AM: snapshot_date
-    mapped["snapshot_date"] = df.get("Snap Date", "").fillna("").astype(str)
-
-    # Filter to last 14 days only
-    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
-    mapped["call_date"] = pd.to_datetime(mapped["call_date"], utc=True, errors="coerce")
-    before_filter = len(mapped)
-    mapped = mapped[mapped["call_date"] >= cutoff].copy()
-    logger.info("Rows in last " + str(LOOKBACK_DAYS) + " days: " + str(len(mapped)) + " (filtered from " + str(before_filter) + ")")
-
-    return mapped[SHEET_HEADERS]
-
-
+# ─── Sheets ──────────────────────────────────────────────────────────────────
 def get_sheets_service():
-    creds_json = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
-    if not creds_json:
-        raise ValueError("GOOGLE_SHEETS_CREDENTIALS not set")
-    creds_dict = json.loads(creds_json)
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SHEET_SCOPES)
+    raw = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
+    if not raw:
+        raise RuntimeError("GOOGLE_SHEETS_CREDENTIALS not set")
+    creds = Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES)
     return build("sheets", "v4", credentials=creds)
 
 
-def get_existing_accounts(service):
-    """Get all existing WesBank account numbers from column V."""
-    result = service.spreadsheets().values().get(
+def get_sheet_id(svc, tab_name):
+    meta = svc.spreadsheets().get(
         spreadsheetId=SHEET_ID,
-        range=SHEET_TAB + "!V:V"
+        fields="sheets(properties(sheetId,title))",
+    ).execute()
+    for s in meta["sheets"]:
+        if s["properties"]["title"] == tab_name:
+            return s["properties"]["sheetId"]
+    raise RuntimeError(f"Tab {tab_name!r} not found")
+
+
+def read_header(svc):
+    res = svc.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID, range=f"{SHEET_TAB}!1:1",
+    ).execute()
+    return (res.get("values") or [[]])[0]
+
+
+def read_existing_accounts(svc, acct_idx):
+    letter = _col_letter(acct_idx)
+    res = svc.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID,
+        range=f"{SHEET_TAB}!{letter}2:{letter}",
+        valueRenderOption="UNFORMATTED_VALUE",
+    ).execute()
+    return {acc for acc in (_norm_account(r[0]) for r in res.get("values", []) if r) if acc}
+
+
+def read_total_data_rows(svc):
+    """Returns the count of populated data rows (excluding header)."""
+    res = svc.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID, range=f"{SHEET_TAB}!A:A",
+    ).execute()
+    n = len(res.get("values", []))
+    return max(n - 1, 0)
+
+
+def format_account_col_as_text(svc, sheet_id, acct_idx):
+    """One-shot repeatCell — sets format of every data cell in the account
+    column to TEXT. Idempotent."""
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=SHEET_ID,
+        body={"requests": [{
+            "repeatCell": {
+                "range": {
+                    "sheetId":           sheet_id,
+                    "startRowIndex":     1,                # skip header row
+                    "startColumnIndex":  acct_idx,
+                    "endColumnIndex":    acct_idx + 1,
+                },
+                "cell":   {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }]},
     ).execute()
 
-    values = result.get("values", [])
-    if not values or len(values) < 2:
-        return set()
 
-    existing = set()
-    for row in values[1:]:  # skip header
-        if row and row[0]:
-            val = str(row[0]).strip()
-            # Remove .0 suffix if present (Google Sheets stores numbers as floats)
-            if val.endswith(".0"):
-                val = val[:-2]
-            val = val.strip()
-            if val and val != "account number":
-                existing.add(val)
-
-    logger.info("Existing account numbers in sheet: " + str(len(existing)))
-    if existing:
-        sample = list(existing)[:3]
-        logger.info("Sample existing accounts: " + str(sample))
-    return existing
-
-
-def append_new_rows(service, df):
-    if df.empty:
-        logger.info("No new rows to append")
-        return 0
-
-    rows = []
-    for _, row in df.iterrows():
-        formatted = []
-        for val in row:
-            try:
-                if pd.isna(val):
-                    formatted.append("")
-                    continue
-            except (TypeError, ValueError):
-                pass
-            if hasattr(val, 'strftime'):
-                formatted.append(val.strftime("%Y-%m-%d %H:%M:%S"))
-            else:
-                s = str(val) if val is not None else ""
-                formatted.append("" if s in ["nan", "NaT", "None"] else s)
-        rows.append(formatted)
-
-    body = {"values": rows}
-    service.spreadsheets().values().append(
-        spreadsheetId=SHEET_ID,
-        range=SHEET_TAB + "!A1",
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body=body
-    ).execute()
-
-    logger.info("Appended " + str(len(rows)) + " new rows")
-    return len(rows)
-
-
-def send_email(new_count, total_file_rows, filtered_rows, filename):
-    if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
-        logger.warning("Email credentials not set — skipping email")
+def append_rows(svc, rows):
+    if not rows:
         return
-
-    recipients = [r.strip() for r in EMAIL_RECIPIENT.split(",") if r.strip()]
-
-    msg = MIMEMultipart()
-    msg["From"] = EMAIL_SENDER
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = "VW/Audi Sales Sync — " + str(new_count) + " new rows added"
-
-    body = "<html><body style='font-family:Arial,sans-serif;max-width:500px;'>"
-    body += "<div style='background:#1F3864;padding:20px;border-radius:8px 8px 0 0;'>"
-    body += "<h2 style='color:white;margin:0;'>VW/Audi Sales Dashboard Updated</h2></div>"
-    body += "<div style='padding:20px;background:#EBF3FB;'><table width='100%' cellpadding='8'>"
-    body += "<tr><td>Source file</td><td align='right'><b>" + filename + "</b></td></tr>"
-    body += "<tr><td>Total rows in file</td><td align='right'><b>" + str(total_file_rows) + "</b></td></tr>"
-    body += "<tr><td>Rows in last 14 days</td><td align='right'><b>" + str(filtered_rows) + "</b></td></tr>"
-    body += "<tr><td>New rows added</td><td align='right'><b style='color:#375623;'>" + str(new_count) + "</b></td></tr>"
-    body += "</table>"
-    body += "<p style='font-size:12px;color:#595959;'><a href='https://docs.google.com/spreadsheets/d/" + SHEET_ID + "'>Open Google Sheet</a></p>"
-    body += "</div></body></html>"
-
-    msg.attach(MIMEText(body, "html"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.sendmail(EMAIL_SENDER, recipients, msg.as_string())
-    logger.info("Email sent to " + ", ".join(recipients))
+    svc.spreadsheets().values().append(
+        spreadsheetId=SHEET_ID,
+        range=f"{SHEET_TAB}!A1",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": rows},
+    ).execute()
 
 
+def sort_by_column(svc, sheet_id, sort_col_idx, total_data_rows, header_cols):
+    """Sort SALES!2:end ascending by sort_col_idx. Header row preserved."""
+    if total_data_rows <= 1:
+        return
+    svc.spreadsheets().batchUpdate(
+        spreadsheetId=SHEET_ID,
+        body={"requests": [{
+            "sortRange": {
+                "range": {
+                    "sheetId":          sheet_id,
+                    "startRowIndex":    1,                       # row 2
+                    "endRowIndex":      total_data_rows + 1,     # +1 for header
+                    "startColumnIndex": 0,
+                    "endColumnIndex":   header_cols,
+                },
+                "sortSpecs": [{"dimensionIndex": sort_col_idx,
+                               "sortOrder": "ASCENDING"}],
+            }
+        }]},
+    ).execute()
+
+
+# ─── Email ───────────────────────────────────────────────────────────────────
+def _format_dt(v):
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d %H:%M")
+    return str(v) if v is not None else ""
+
+
+def build_summary_html(stats, preview_rows, header, bindings):
+    """Build the HTML summary table — used by both live + dry-run emails."""
+    h_acct = header[bindings["account"]] if bindings["account"] is not None else ""
+    h_ct   = header[bindings["created_time"]] if bindings["created_time"] is not None else ""
+    h_mfr  = header[bindings["manufacturer"]] if bindings["manufacturer"] is not None else ""
+    h_fn   = header[bindings["first_name"]] if bindings["first_name"] is not None else ""
+    h_ln   = header[bindings["last_name"]] if bindings["last_name"] is not None else ""
+
+    mfr_breakdown = stats.get("mfr_counts") or {}
+    mfr_lines = "".join(
+        f"<li>{k or '(blank)'}: <b>{v:,}</b></li>"
+        for k, v in sorted(mfr_breakdown.items(), key=lambda x: -x[1])
+    ) or "<li>(no breakdown — Manufacturer column not bound)</li>"
+
+    if preview_rows:
+        preview_html = (
+            '<table border="1" cellpadding="4" cellspacing="0" '
+            'style="border-collapse:collapse;font-size:12px;">'
+            '<tr style="background:#1F3864;color:white;">'
+            '<th>WesBank Account #</th><th>Manufacturer</th>'
+            '<th>Created Time</th><th>Name</th></tr>' +
+            "".join(
+                f'<tr><td>{r.get(h_acct, "")}</td>'
+                f'<td>{r.get(h_mfr, "")}</td>'
+                f'<td>{_format_dt(r.get(h_ct, ""))}</td>'
+                f'<td>{r.get(h_fn, "")} {r.get(h_ln, "")}</td></tr>'
+                for r in preview_rows
+            ) + "</table>"
+        )
+    else:
+        preview_html = "<p><i>No new rows.</i></p>"
+
+    return (
+        '<html><body style="font-family:Arial,sans-serif;color:#262626;max-width:680px;">'
+        '<div style="background:#1F3864;padding:18px;border-radius:8px 8px 0 0;">'
+        f'<h2 style="color:white;margin:0;">VW/Audi Sales Sync</h2></div>'
+        '<div style="padding:18px;background:#EBF3FB;">'
+        '<table width="100%" cellpadding="6">'
+        f'<tr><td>Source file</td><td align="right"><b>{stats["source_file"]}</b></td></tr>'
+        f'<tr><td>Total rows in file</td><td align="right"><b>{stats["file_rows"]:,}</b></td></tr>'
+        f'<tr><td>Already in SALES</td><td align="right">'
+        f'<b>{stats["existing_in_sales"]:,}</b></td></tr>'
+        f'<tr><td>{"Would-be appended" if stats["dry_run"] else "Appended"}</td>'
+        f'<td align="right"><b style="color:#375623;">{stats["new_rows"]:,}</b></td></tr>'
+        f'<tr><td>SALES rows after</td><td align="right"><b>{stats["total_after"]:,}</b></td></tr>'
+        f'<tr><td>Created Time range</td><td align="right">'
+        f'<b>{stats["min_created"]} &rarr; {stats["max_created"]}</b></td></tr>'
+        '</table>'
+        f'<h4 style="color:#1F3864;">Manufacturer breakdown</h4><ul>{mfr_lines}</ul>'
+        f'<h4 style="color:#1F3864;">First {len(preview_rows)} preview row(s)</h4>{preview_html}'
+        '</div></body></html>'
+    )
+
+
+def send_summary_email(stats, preview_rows, header, bindings):
+    if not EMAIL_SENDER or not EMAIL_PASSWORD:
+        logger.warning("EMAIL_SENDER / EMAIL_PASSWORD not set — skipping email")
+        return
+    if stats["dry_run"]:
+        recipients = [DRY_RUN_RECIPIENT]
+        subject = f"[DRY RUN] VW/Audi Sales Sync — {stats['new_rows']} would-be new row(s)"
+    else:
+        recipients = [r.strip() for r in EMAIL_RECIPIENT.split(",") if r.strip()]
+        if not recipients:
+            recipients = [DRY_RUN_RECIPIENT]
+        subject = f"VW/Audi Sales Sync — {stats['new_rows']} new row(s) added"
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"]    = EMAIL_SENDER
+    msg["To"]      = ", ".join(recipients)
+    msg.set_content("HTML email — see HTML part for the table.")
+    msg.add_alternative(build_summary_html(stats, preview_rows, header, bindings),
+                        subtype="html")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        s.send_message(msg)
+    logger.info("Summary email sent → %s", msg["To"])
+
+
+# ─── Main ────────────────────────────────────────────────────────────────────
 def main():
-    run_date = datetime.now()
+    run_dt = datetime.utcnow()
     logger.info("=" * 60)
-    logger.info("VW/AUDI SALES SYNC")
-    logger.info("Date: " + run_date.strftime("%d %B %Y %H:%M"))
-    logger.info("Lookback: last " + str(LOOKBACK_DAYS) + " days")
+    logger.info("VW/AUDI SALES SYNC (raw passthrough)")
+    logger.info("Run date : %s UTC", run_dt.isoformat(timespec="seconds"))
+    logger.info("Dry run  : %s", DRY_RUN)
     logger.info("=" * 60)
 
-    # Step 1: Download latest file from SFTP
+    # Step 1 — SFTP fetch
     ssh, sftp = get_sftp_client()
     try:
-        folder, filename = find_latest_file(sftp)
-        buf = download_file(sftp, folder, filename)
+        filename = find_latest_file(sftp)
+        buf = download_file(sftp, filename)
     finally:
-        sftp.close()
-        ssh.close()
+        sftp.close(); ssh.close()
+    df = pd.read_excel(buf)
+    logger.info("Source file : %s  (%d rows × %d cols)",
+                filename, len(df), len(df.columns))
 
-    # Step 2: Parse and map columns, filter to last 14 days
-    df_mapped = parse_and_map(buf)
-    logger.info("Mapped rows after date filter: " + str(len(df_mapped)))
+    # Step 2 — read SALES header + bind required cols
+    svc = get_sheets_service()
+    header = read_header(svc)
+    if not header:
+        raise RuntimeError(f"{SHEET_TAB} header row is empty")
+    logger.info("SALES header: %d cols", len(header))
+    bindings = bind_columns(header)
 
-    # Step 3: Get existing account numbers from sheet
-    service = get_sheets_service()
-    existing_accounts = get_existing_accounts(service)
+    missing = [k for k in ("account", "created_time")
+               if bindings[k] is None]
+    if missing:
+        logger.error("Could not bind required SALES columns: %s. "
+                     "Header was: %s", missing, header)
+        sys.exit(2)
 
-    # Step 4: Filter to new rows only (dedupe by WesBank account number)
-    df_new = df_mapped[
-        ~df_mapped["account number"].astype(str).str.strip().isin(existing_accounts)
-    ].copy()
+    h_acct = header[bindings["account"]]
+    h_ct   = header[bindings["created_time"]]
+    logger.info("  account-number col : %s (idx %d, header %r)",
+                _col_letter(bindings["account"]), bindings["account"], h_acct)
+    logger.info("  created-time   col : %s (idx %d, header %r)",
+                _col_letter(bindings["created_time"]), bindings["created_time"], h_ct)
+    for opt in ("manufacturer", "first_name", "last_name"):
+        idx = bindings[opt]
+        logger.info("  %-15s col : %s",
+                    opt, "(not bound)" if idx is None
+                    else f"{_col_letter(idx)} (idx {idx}, header {header[idx]!r})")
 
-    logger.info("New rows to add: " + str(len(df_new)))
-    logger.info("Already in sheet: " + str(len(df_mapped) - len(df_new)))
+    # Step 3 — dedupe set from SALES col Y
+    if h_acct not in df.columns:
+        logger.error("SFTP file is missing the source column %r — cannot dedupe. "
+                     "Source columns: %s", h_acct, list(df.columns))
+        sys.exit(3)
+    existing = read_existing_accounts(svc, bindings["account"])
+    logger.info("Existing accounts in SALES: %d", len(existing))
 
-    # Step 5: Append
-    added = append_new_rows(service, df_new)
+    # Step 4 — filter SFTP rows to new ones (also dedupe within file)
+    new_rows = []
+    seen_in_run = set()
+    blank_acct = 0
+    in_sales = 0
+    in_run = 0
+    for _, row in df.iterrows():
+        acc = _norm_account(row.get(h_acct))
+        if not acc:
+            blank_acct += 1
+            continue
+        if acc in existing:
+            in_sales += 1
+            continue
+        if acc in seen_in_run:
+            in_run += 1
+            continue
+        seen_in_run.add(acc)
+        new_rows.append(row)
 
-    # Step 6: Email
-    send_email(added, 0, len(df_mapped), filename)
+    logger.info("Filter result:")
+    logger.info("  blank account#       : %d", blank_acct)
+    logger.info("  already in SALES     : %d", in_sales)
+    logger.info("  duplicate within file: %d", in_run)
+    logger.info("  NEW rows             : %d", len(new_rows))
+
+    # Step 5 — preview (always)
+    if new_rows:
+        for i, r in enumerate(new_rows[:5], start=1):
+            logger.info("  preview %d: acct=%-14s mfr=%-12s ct=%s  name=%s %s",
+                        i,
+                        r.get(h_acct, ""),
+                        (r.get(header[bindings["manufacturer"]], "")
+                         if bindings["manufacturer"] is not None else ""),
+                        _format_dt(r.get(h_ct, "")),
+                        (r.get(header[bindings["first_name"]], "")
+                         if bindings["first_name"] is not None else ""),
+                        (r.get(header[bindings["last_name"]], "")
+                         if bindings["last_name"] is not None else ""))
+
+    # Step 6 — stats
+    if new_rows:
+        ct_series = pd.to_datetime(
+            pd.Series([r.get(h_ct) for r in new_rows]), errors="coerce")
+        min_ct = _format_dt(ct_series.min())
+        max_ct = _format_dt(ct_series.max())
+    else:
+        min_ct = max_ct = "(no new rows)"
+
+    if new_rows and bindings["manufacturer"] is not None:
+        h_mfr = header[bindings["manufacturer"]]
+        mfr_counts = pd.Series(
+            [str(r.get(h_mfr, "")).strip().upper() for r in new_rows]
+        ).value_counts().to_dict()
+    else:
+        mfr_counts = {}
+
+    # Step 7 — write (live only)
+    if DRY_RUN or not new_rows:
+        if DRY_RUN:
+            logger.info("DRY RUN — skipping format-cell + append + sort")
+        total_after = len(existing)   # plus any in the sheet but blank-accounted (rare)
+        # Read for accuracy:
+        try:
+            total_after = read_total_data_rows(svc)
+        except Exception:
+            pass
+    else:
+        sheet_id = get_sheet_id(svc, SHEET_TAB)
+        logger.info("Setting col %s format → TEXT (account #s as plain text) …",
+                    _col_letter(bindings["account"]))
+        format_account_col_as_text(svc, sheet_id, bindings["account"])
+
+        logger.info("Appending %d row(s) to %s …", len(new_rows), SHEET_TAB)
+        aligned = [align_row_to_header(r, header) for r in new_rows]
+        append_rows(svc, aligned)
+
+        total_after = read_total_data_rows(svc)
+        logger.info("Sorting SALES!2:%d ascending by col %s (Created Time) …",
+                    total_after + 1, _col_letter(bindings["created_time"]))
+        sort_by_column(svc, sheet_id, bindings["created_time"],
+                       total_after, len(header))
+
+    # Step 8 — email summary
+    stats = {
+        "source_file":       filename,
+        "file_rows":         len(df),
+        "existing_in_sales": len(existing),
+        "new_rows":          len(new_rows),
+        "total_after":       total_after,
+        "min_created":       min_ct,
+        "max_created":       max_ct,
+        "mfr_counts":        mfr_counts,
+        "dry_run":           DRY_RUN,
+    }
+    send_summary_email(stats, new_rows[:5], header, bindings)
 
     logger.info("=" * 60)
-    logger.info("Done. Added " + str(added) + " new rows.")
+    logger.info("DONE — %s", "would have appended" if DRY_RUN else "appended")
+    logger.info("  new rows         : %d", len(new_rows))
+    logger.info("  total after      : %d", total_after)
+    logger.info("  Created Time     : %s → %s", min_ct, max_ct)
+    if mfr_counts:
+        logger.info("  by Manufacturer  : %s", mfr_counts)
     logger.info("=" * 60)
 
 

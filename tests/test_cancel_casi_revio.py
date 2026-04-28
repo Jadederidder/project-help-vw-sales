@@ -127,6 +127,17 @@ class SalesPhoneMap(unittest.TestCase):
             ccr.build_sales_phone_map(["account number", "phone_number"], [])
         self.assertIn("id_number", str(cx.exception))
 
+    def test_binds_raw_sftp_headers(self):
+        """Post-rebuild SALES tab uses raw Wesbank EOD headers — verify the
+        defensive matcher binds them correctly."""
+        m = ccr.build_sales_phone_map(
+            ["WesBank Account Number", "Mobile Number (VW/Audi Campaign 1)",
+             "ID Number"],
+            [["87000000002", "0822222222", "8502020002345"]],
+        )
+        self.assertEqual(m["by_account"]["87000000002"], "0822222222")
+        self.assertEqual(m["by_id"]["8502020002345"], "0822222222")
+
     def test_skips_blank_acct_or_id(self):
         m = ccr.build_sales_phone_map(
             ["account number", "phone_number", "IDENTITY_OR_REG_NUM"],
