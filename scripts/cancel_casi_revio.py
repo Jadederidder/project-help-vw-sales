@@ -72,15 +72,18 @@ REQUIRED_FIELDS = {
 }
 OPTIONAL_FIELDS = {"revio_status", "id_number"}
 
-# SALES tab — source of truth for phones. Headers per sync_sales_to_sheets.py:
-#   col F = "phone_number"
-#   col V = "account number"  (lowercase, with space)
-#   col Y = "IDENTITY_OR_REG_NUM"
+# SALES tab — source of truth for phones. Tolerates both the post-rebuild raw
+# Wesbank EOD schema (e.g. "WesBank Account Number", "Mobile Number (VW/Audi
+# Campaign 1)", "ID Number") AND the pre-rebuild transformed schema (e.g.
+# "account number", "phone_number", "IDENTITY_OR_REG_NUM"). Adding to either
+# list is safe; the first matching variant wins.
 SALES_HEADER_VARIANTS = {
-    "account_number": ["account number", "account_number", "accountnumber"],
-    "id_number":      ["identity_or_reg_num", "identity or reg num",
-                       "id_number", "id number"],
-    "phone":          ["phone_number", "phone number", "phonenumber",
+    "account_number": ["WesBank Account Number", "Wesbank Account Number",
+                       "account number", "account_number", "accountnumber"],
+    "id_number":      ["ID Number", "id number",
+                       "identity_or_reg_num", "identity or reg num", "id_number"],
+    "phone":          ["Mobile Number (VW/Audi Campaign 1)", "Mobile Number",
+                       "phone_number", "phone number", "phonenumber",
                        "phone", "cellphone", "mobile"],
 }
 
