@@ -10,6 +10,7 @@
 # ============================================================
 
 import os
+import re
 import sys
 import logging
 import smtplib
@@ -45,6 +46,11 @@ EMAIL_PASSWORD  = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_RECIPIENT = os.environ.get("EMAIL_RECIPIENT", "")
 
 LOOKBACK_DAYS = 14
+
+# SN_NUMBER column lives at sheet col AN (idx 39) and the new SFTP-file
+# format has a "Policy Number" column. Tolerate header-text drift.
+SN_NUMBER_VARIANTS = ["sn _number", "sn_number", "sn number", "policy number"]
+EXPECTED_SN_COL_IDX = 39  # 0-based; sheet col AN
 
 # Google Sheet column order — must match exactly
 SHEET_HEADERS = [
@@ -88,6 +94,32 @@ SHEET_HEADERS = [
     "CUST_TYPE_DESC",          # AL - CUST_TYPE_DESC
     "snapshot_date",           # AM - Snap Date
 ]
+
+
+def _norm(s):
+    """Lowercase + strip whitespace and underscores. Used for header drift."""
+    return re.sub(r"[\s_]+", "", str(s or "").lower())
+
+
+def _col_letter(idx_0):
+    n = idx_0 + 1
+    out = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def find_sn_col_idx(header_row):
+    """Return 0-based index of the SN_NUMBER column in the SALES header,
+    or None if no SN-variant header is present."""
+    sn_set = {_norm(v) for v in SN_NUMBER_VARIANTS}
+    for i, h in enumerate(header_row or []):
+        if h is None or h == "":
+            continue
+        if _norm(h) in sn_set:
+            return i
+    return None
 
 
 def get_sftp_client():
@@ -256,6 +288,10 @@ def parse_and_map(buf):
     # AM: snapshot_date
     mapped["snapshot_date"] = df.get("Snap Date", "").fillna("").astype(str)
 
+    # AN: policy_number — Policy Number column from the new file format.
+    # Routed through find_sn_col_idx at append-time (defensive header match).
+    mapped["policy_number"] = df.get("Policy Number", "").fillna("").astype(str)
+
     # Filter to last 14 days only
     cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     mapped["call_date"] = pd.to_datetime(mapped["call_date"], utc=True, errors="coerce")
@@ -263,7 +299,7 @@ def parse_and_map(buf):
     mapped = mapped[mapped["call_date"] >= cutoff].copy()
     logger.info("Rows in last " + str(LOOKBACK_DAYS) + " days: " + str(len(mapped)) + " (filtered from " + str(before_filter) + ")")
 
-    return mapped[SHEET_HEADERS]
+    return mapped[SHEET_HEADERS + ["policy_number"]]
 
 
 def get_sheets_service():
@@ -304,26 +340,38 @@ def get_existing_accounts(service):
     return existing
 
 
-def append_new_rows(service, df):
+def _format_cell(val):
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(val, "strftime"):
+        return val.strftime("%Y-%m-%d %H:%M:%S")
+    s = str(val) if val is not None else ""
+    return "" if s in ["nan", "NaT", "None"] else s
+
+
+def append_new_rows(service, df, sn_col_idx):
+    """Append rows positionally (cols A through AM = SHEET_HEADERS) and place
+    Policy Number at sn_col_idx if a non-None value was supplied."""
     if df.empty:
         logger.info("No new rows to append")
         return 0
 
     rows = []
     for _, row in df.iterrows():
-        formatted = []
-        for val in row:
-            try:
-                if pd.isna(val):
-                    formatted.append("")
-                    continue
-            except (TypeError, ValueError):
-                pass
-            if hasattr(val, 'strftime'):
-                formatted.append(val.strftime("%Y-%m-%d %H:%M:%S"))
+        # Cols A–AM: positional, in SHEET_HEADERS order
+        formatted = [_format_cell(row[col]) for col in SHEET_HEADERS]
+        # Place policy_number at sn_col_idx if requested
+        if sn_col_idx is not None:
+            policy = _format_cell(row.get("policy_number", ""))
+            while len(formatted) < sn_col_idx:
+                formatted.append("")
+            if len(formatted) == sn_col_idx:
+                formatted.append(policy)
             else:
-                s = str(val) if val is not None else ""
-                formatted.append("" if s in ["nan", "NaT", "None"] else s)
+                formatted[sn_col_idx] = policy
         rows.append(formatted)
 
     body = {"values": rows}
@@ -337,6 +385,34 @@ def append_new_rows(service, df):
 
     logger.info("Appended " + str(len(rows)) + " new rows")
     return len(rows)
+
+
+def resolve_sn_col_idx(service):
+    """Read the live SALES header and bind the SN_NUMBER column. Returns the
+    0-based index, or None if Policy Number should not be written this run."""
+    res = service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID, range=SHEET_TAB + "!1:1",
+    ).execute()
+    header = (res.get("values") or [[]])[0]
+    sn_idx = find_sn_col_idx(header)
+    if sn_idx is None:
+        # Empty cell at expected position → first-time bootstrap, write to AN
+        if len(header) <= EXPECTED_SN_COL_IDX or not header[EXPECTED_SN_COL_IDX]:
+            logger.info("SN_NUMBER header missing — defaulting to col AN (idx %d) on first append",
+                        EXPECTED_SN_COL_IDX)
+            return EXPECTED_SN_COL_IDX
+        logger.warning("col AN header is %r — does not match any SN variant; "
+                       "Policy Number will NOT be written this run",
+                       header[EXPECTED_SN_COL_IDX])
+        return None
+    if sn_idx != EXPECTED_SN_COL_IDX:
+        logger.warning("SN_NUMBER bound at col %s (idx %d), expected col AN (idx %d) — "
+                       "writing at the bound position",
+                       _col_letter(sn_idx), sn_idx, EXPECTED_SN_COL_IDX)
+    else:
+        logger.info("SN_NUMBER bound at col %s (idx %d)",
+                    _col_letter(sn_idx), sn_idx)
+    return sn_idx
 
 
 def send_email(new_count, total_file_rows, filtered_rows, filename):
@@ -396,6 +472,9 @@ def main():
     service = get_sheets_service()
     existing_accounts = get_existing_accounts(service)
 
+    # Step 3a: Resolve where Policy Number should land (col AN, defensive)
+    sn_col_idx = resolve_sn_col_idx(service)
+
     # Step 4: Filter to new rows only (dedupe by WesBank account number)
     df_new = df_mapped[
         ~df_mapped["account number"].astype(str).str.strip().isin(existing_accounts)
@@ -405,7 +484,7 @@ def main():
     logger.info("Already in sheet: " + str(len(df_mapped) - len(df_new)))
 
     # Step 5: Append
-    added = append_new_rows(service, df_new)
+    added = append_new_rows(service, df_new, sn_col_idx)
 
     # Step 6: Email
     send_email(added, 0, len(df_mapped), filename)
