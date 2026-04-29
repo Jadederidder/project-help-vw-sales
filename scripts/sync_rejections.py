@@ -333,7 +333,13 @@ def send_summary_email(run_date, source_email_dates, stats, dedupe_skipped,
         return
 
     plural = "s" if new_count != 1 else ""
-    subject = f"VW Rejections Sync — {new_count} new rejection{plural}"
+    date_label = run_date.strftime("%d %b %Y")
+    if error_summary:
+        subject = f"⚠ VW Rejections — error during sync ({date_label})"
+    elif new_count == 0:
+        subject = f"✅ VW Rejections — clean ({date_label})"
+    else:
+        subject = f"📥 VW Rejections — {new_count} new rejection{plural} ({date_label})"
     if dry_run:
         subject = f"[DRY RUN] {subject}"
 
@@ -343,6 +349,10 @@ def send_summary_email(run_date, source_email_dates, stats, dedupe_skipped,
     body_lines = [
         f"VW/Audi Rejections daily sync — {run_date.strftime('%d %b %Y %H:%M %Z')}",
         "",
+    ]
+    if not error_summary and new_count == 0:
+        body_lines += ["  ✅ Run completed clean — nothing to action today.", ""]
+    body_lines += [
         f"  Source emails       : {src_lines}",
         f"  CSV rows examined   : {stats.get('examined', 0)}",
         f"  Filtered: A rows    : {stats.get('skipped_a', 0)}",

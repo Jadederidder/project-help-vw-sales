@@ -341,11 +341,41 @@ def send_summary_email(stats, rows_detail, dry_run):
         rec_raw = os.environ.get("EMAIL_RECIPIENT", "")
         recipients = [r.strip() for r in rec_raw.split(",") if r.strip()] or [DRY_RUN_RECIPIENT]
         subject_prefix = ""
-    subject = (
-        f"{subject_prefix}VW Casi Cancellations — "
-        f"{stats['cancelled']} cancelled, {stats['skipped']} skipped, "
-        f"{stats['errors']} errors"
-    )
+
+    # "Action" = cancellations + rows skipped for unknown reason (JD must
+    # manually classify those). Phone-source issues (no_phone, phone_invalid)
+    # are tracked but auto-marked Processed Date so don't need attention.
+    skipped_unknown = (stats["skipped"] - stats["no_phone"]
+                       - stats["phone_invalid"])
+    action_count = stats["cancelled"] + skipped_unknown
+    errors = stats["errors"]
+
+    if errors > 0:
+        subject = (f"{subject_prefix}⚠ VW Casi Cancellations — "
+                   f"{errors} error(s); {stats['cancelled']} cancelled, "
+                   f"{skipped_unknown} to classify")
+    elif action_count == 0:
+        subject = f"{subject_prefix}✅ VW Casi Cancellations — clean (0 actions)"
+    else:
+        subject = (f"{subject_prefix}📥 VW Casi Cancellations — "
+                   f"{stats['cancelled']} cancelled, "
+                   f"{skipped_unknown} to classify")
+
+    if errors > 0:
+        banner_html = (
+            '<p style="background:#fde8ea;border:1px solid #f9c0c5;'
+            'padding:12px;border-radius:6px;color:#b81020;font-size:13px;">'
+            f'<b>⚠ {errors} error(s) reported — see table below.</b></p>'
+        )
+    elif action_count == 0:
+        banner_html = (
+            '<p style="background:#e2efda;border:1px solid #c5e0b4;'
+            'padding:12px;border-radius:6px;color:#385723;font-size:13px;">'
+            '<b>✅ Run completed clean — nothing to action today.</b></p>'
+        )
+    else:
+        banner_html = ""
+
     rows_html = "".join(
         f'<tr><td>{r["account"]}</td><td>{r["reason"]}</td>'
         f'<td>{r["cover"]}</td><td>{r["status"]}</td><td>{r["notes"]}</td></tr>'
@@ -355,6 +385,7 @@ def send_summary_email(stats, rows_detail, dry_run):
     html = (
         f'<html><body style="font-family:Arial,sans-serif;color:#262626;">'
         f'<h2 style="color:#1F3864;">VW Casi Cancellations</h2>'
+        f'{banner_html}'
         f'<p style="font-size:13px;">'
         f'<b>Examined:</b> {stats["examined"]}<br>'
         f'<b>Already processed (skipped):</b> {stats["already_processed"]}<br>'
