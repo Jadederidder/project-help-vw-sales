@@ -2,9 +2,10 @@ name: Daily VW/Audi Rejections Sync
 
 on:
   schedule:
-    # 01:32 SAST = 23:32 UTC. Sits between sync_cancellations (23:17 UTC)
-    # and cancel_casi_revio (23:47 UTC).
-    - cron: "32 23 * * *"
+    # 04:05 SAST = 02:05 UTC. 5 min after sync_cancellations (02:00 UTC),
+    # 5 min before cancel_casi_revio (02:10 UTC). Email lands well before
+    # JD's 04:30 SAST start.
+    - cron: "5 2 * * *"
 
   workflow_dispatch:
     inputs:

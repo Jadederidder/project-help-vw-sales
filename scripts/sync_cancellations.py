@@ -380,13 +380,20 @@ def send_summary_email(run_date, new_rows, emails_processed, dupes_skipped, dry_
     n = len(new_rows)
     date_label = run_date.strftime("%d %b %Y")
     plural = "s" if n != 1 else ""
-    subject = f"VW Cancellations Sync — {date_label} — {n} new row{plural}"
+    if n == 0:
+        subject = f"✅ VW Cancellations — clean ({date_label})"
+    else:
+        subject = f"📥 VW Cancellations — {n} new row{plural} ({date_label})"
     if dry_run:
         subject = f"[DRY RUN] {subject}"
 
     body_lines = [
         f"VW/Audi Cancellations daily sync — {date_label}",
         "",
+    ]
+    if n == 0:
+        body_lines += ["  ✅ Run completed clean — nothing to action today.", ""]
+    body_lines += [
         f"  Emails processed   : {emails_processed}",
         f"  New rows appended  : {n}",
         f"  Already-in-sheet   : {dupes_skipped}",

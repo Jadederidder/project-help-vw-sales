@@ -2,8 +2,10 @@ name: Daily VW/Audi Cancellations Sync
 
 on:
   schedule:
-    # 01:17 SAST = 23:17 UTC. :17 offset avoids top-of-hour GitHub cron pileup.
-    - cron: "17 23 * * *"
+    # 04:00 SAST = 02:00 UTC. Early enough that the summary email lands
+    # in JD's inbox before her 04:30 SAST start. Followed at +5 min by
+    # sync_rejections, +10 min by cancel_casi_revio.
+    - cron: "0 2 * * *"
 
   workflow_dispatch:
     inputs:
