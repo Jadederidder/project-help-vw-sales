@@ -8,18 +8,25 @@ the dashboard (docs/index.html).
 
 Env:
   GOOGLE_SHEETS_CREDENTIALS  service-account JSON (required)
-  DRY_RUN=true               print JSON, write nothing
+  EMAIL_SENDER               Gmail sender for safety-guard alerts (optional)
+  EMAIL_PASSWORD             Gmail app password (optional)
+  EMAIL_RECIPIENT            Alert recipient (default jd@projecthelp.co.za)
+  DRY_RUN=true               print JSON, write nothing, suppress alert email
 
-Safety guard: if the latest month's cumNet drops below the value already
-in summary.json, the script exits non-zero without writing, so the live
-dashboard never regresses from a partial/corrupt sheet read.
+Safety guards (both abort with exit code 2, leaving summary.json untouched):
+  1. Latest month's cumNet must not drop below the value already on disk.
+  2. No past month's gross may flip from positive to 0/missing — catches
+     the case where a DASHBOARD formula breaks and zeroes out a month.
+     On trip, emails JD so the silent-poisoning class of bug is visible.
 """
 
 import json
 import logging
 import os
+import smtplib
 import sys
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 
 import gspread
@@ -251,6 +258,81 @@ def _existing_cumnet():
     return None
 
 
+def _existing_grosses():
+    """Return { 'Mon YYYY': gross } from the on-disk summary.json, or {}."""
+    if not OUT_PATH.exists():
+        return {}
+    try:
+        prev = json.loads(OUT_PATH.read_text(encoding="utf-8"))
+        return {
+            m["month"]: m.get("gross")
+            for m in prev.get("months", [])
+            if m.get("month")
+        }
+    except Exception as e:
+        logger.warning("Could not read existing summary.json: %s", e)
+        return {}
+
+
+def _gross_regressions(payload):
+    """Months where previous gross was positive but new gross is 0/missing."""
+    prev = _existing_grosses()
+    if not prev:
+        return []
+    new_by_month = {m["month"]: m.get("gross") for m in payload["months"]}
+    violations = []
+    for month, prev_gross in prev.items():
+        if not isinstance(prev_gross, (int, float)) or prev_gross <= 0:
+            continue
+        new_gross = new_by_month.get(month)
+        if new_gross is None or new_gross == 0:
+            violations.append((month, prev_gross, new_gross))
+    return violations
+
+
+def _email_gross_regression(violations):
+    sender    = os.environ.get("EMAIL_SENDER", "")
+    password  = os.environ.get("EMAIL_PASSWORD", "")
+    recipient = os.environ.get("EMAIL_RECIPIENT", "jd@projecthelp.co.za")
+    if not sender or not password:
+        logger.warning(
+            "EMAIL_SENDER / EMAIL_PASSWORD not set — skipping regression alert"
+        )
+        return
+
+    lines = "\n".join(
+        f"  - {m}: previous gross = {pg}, new gross = {ng if ng is not None else 'missing'}"
+        for m, pg, ng in violations
+    )
+    body = (
+        "Hi JD,\n\n"
+        "export_summary.py refused to write docs/data/summary.json because "
+        f"{len(violations)} past month(s) had positive gross drop to 0 or "
+        "vanish from the DASHBOARD tab:\n\n"
+        f"{lines}\n\n"
+        "The dashboard has been left on its previous values. Likely cause: "
+        "a formula or source row in DASHBOARD/MASTER_BOOK was edited or "
+        "deleted. Inspect the affected cells and re-run the sync once "
+        "they're repaired.\n\n"
+        "— VW Sales Automation"
+    )
+    msg = EmailMessage()
+    msg["Subject"] = (
+        f"VW Dashboard — gross regression on "
+        f"{len(violations)} month(s), sync aborted"
+    )
+    msg["From"]    = sender
+    msg["To"]      = recipient
+    msg.set_content(body)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(sender, password)
+            smtp.send_message(msg)
+        logger.info("Regression alert sent → %s", recipient)
+    except Exception as e:
+        logger.error("Failed to send regression alert: %s", e)
+
+
 def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -267,6 +349,21 @@ def main():
             "aborting to avoid regressing the dashboard",
             new_cum, prev_cum,
         )
+        sys.exit(2)
+
+    violations = _gross_regressions(payload)
+    if violations:
+        detail = "; ".join(
+            f"{m} ({pg} → {ng if ng is not None else 'missing'})"
+            for m, pg, ng in violations
+        )
+        logger.error(
+            "SAFETY GUARD: %d past month(s) had positive gross drop to 0/missing — "
+            "aborting to avoid poisoning the dashboard: %s",
+            len(violations), detail,
+        )
+        if not DRY_RUN:
+            _email_gross_regression(violations)
         sys.exit(2)
 
     json_str = json.dumps(payload, indent=2, ensure_ascii=False)
