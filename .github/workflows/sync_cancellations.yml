@@ -61,11 +61,17 @@ jobs:
           DIAGNOSTIC:                ${{ github.event.inputs.diagnostic || 'false' }}
         run: python scripts/sync_cancellations.py
 
-      - name: Commit processed-emails state
+      - name: Export summary data to JSON
+        if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.diagnostic != 'true' }}
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+        run: python scripts/export_summary.py
+
+      - name: Commit processed-emails state and dashboard data
         if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.diagnostic != 'true' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state/processed_emails.json
-          git diff --staged --quiet || git commit -m "chore: update processed cancellation emails state"
+          git add state/processed_emails.json docs/data/summary.json
+          git diff --staged --quiet || git commit -m "chore: update cancellation state and refresh dashboard"
           git push

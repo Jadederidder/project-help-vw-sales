@@ -16,7 +16,7 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   cancel:
@@ -27,6 +27,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v6
@@ -48,6 +50,21 @@ jobs:
           EMAIL_RECIPIENT:           "jd@projecthelp.io"
           DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
         run: python scripts/cancel_casi_revio.py
+
+      - name: Export summary data to JSON
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+        run: python scripts/export_summary.py
+
+      - name: Commit dashboard data to repo
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/data/summary.json
+          git diff --staged --quiet || git commit -m "chore: refresh dashboard data after Casi cancellations"
+          git push
 
       - name: Notify on failure
         if: failure()
