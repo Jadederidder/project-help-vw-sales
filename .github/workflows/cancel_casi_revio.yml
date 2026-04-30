@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  actions:  write
 
 jobs:
   cancel:
@@ -61,13 +62,25 @@ jobs:
         run: python scripts/export_summary.py
 
       - name: Commit dashboard data to repo
+        id: commit
         if: ${{ github.event.inputs.dry_run != 'true' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/data/summary.json
-          git diff --staged --quiet || git commit -m "chore: refresh dashboard data after Casi cancellations"
-          git push
+          if git diff --staged --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: refresh dashboard data after Casi cancellations"
+            git push
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger Pages deploy
+        if: steps.commit.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy_pages.yml --ref main
 
       - name: Notify on failure
         if: failure()
