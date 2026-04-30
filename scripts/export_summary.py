@@ -8,27 +8,24 @@ the dashboard (docs/index.html).
 
 Env:
   GOOGLE_SHEETS_CREDENTIALS  service-account JSON (required)
-  EMAIL_SENDER               Gmail sender for safety-guard alerts (optional)
-  EMAIL_PASSWORD             Gmail app password (optional)
-  EMAIL_RECIPIENT            Alert recipient (default jd@projecthelp.co.za)
-  DRY_RUN=true               print JSON, write nothing, suppress alert email
-  FORCE_OVERWRITE=true       bypass both safety guards (use only after a
-                             manual sheet inspection has confirmed the drop)
+  EMAIL_SENDER               Gmail sender for run-summary + alert emails
+  EMAIL_PASSWORD             Gmail app password
+  EMAIL_RECIPIENT            Recipient (default jd@projecthelp.co.za)
+  DRY_RUN=true               print JSON, write nothing, send no emails
+  FORCE_OVERWRITE=true       bypass the gross-regression guard
 
-Safety guards:
-  1. Past-month gross regression — primary signal. If any past month had
-     a positive gross before and now reads as 0 (or its row vanished),
-     abort with exit code 2 and email JD. This is the actual signature
-     of the 2026-04-28 silent-poisoning incident.
-  2. cumNet drift — secondary backstop. Latest month's cumNet vs the
-     on-disk value:
-       drop > CUMNET_ABORT_THRESHOLD : abort + email JD
-       0 < drop <= threshold         : warn + email JD, proceed
-       no drop                       : silent
-     Small drops (1-10 policies) are legitimate retroactive cancellations
-     and do not block the write.
+Behaviour:
+  The dashboard is a pure replication of the source Google Sheet — the
+  script writes whatever the sheet says. cumNet/totalRevCum can move in
+  either direction without blocking; visibility comes from a run-summary
+  email sent on every successful write.
 
-  FORCE_OVERWRITE=true skips both guards entirely.
+Single safety guard (gross regression on a closed past month):
+  If any month had a positive gross before and now reads as 0 or its
+  row vanished, abort with exit code 2 and email JD. This is the only
+  signature that cannot be produced by any legitimate process — closed
+  past months don't lose sales. Set FORCE_OVERWRITE=true to bypass when
+  a manual sheet inspection has confirmed the drop is intentional.
 """
 
 import json
@@ -53,10 +50,8 @@ OUT_PATH    = Path(__file__).resolve().parent.parent / "docs" / "data" / "summar
 DRY_RUN         = os.environ.get("DRY_RUN", "").lower() == "true"
 FORCE_OVERWRITE = os.environ.get("FORCE_OVERWRITE", "").lower() == "true"
 
-# cumNet drops larger than this trigger an abort. Drops at or below this
-# threshold are treated as legitimate retroactive-cancellation drift —
-# warn + email JD, but proceed with the write.
-CUMNET_ABORT_THRESHOLD = 10
+# Per-month fields surfaced in the run-summary email when their values change.
+TRACKED_FIELDS = ["gross", "cancel", "reject", "netInd", "netFam"]
 
 MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun",
                "Jul","Aug","Sep","Oct","Nov","Dec"]
@@ -263,42 +258,27 @@ def build_payload():
     }
 
 
-def _existing_cumnet():
+def _load_existing():
+    """Return the on-disk summary.json as a dict, or None if absent/unreadable."""
     if not OUT_PATH.exists():
         return None
     try:
-        prev = json.loads(OUT_PATH.read_text(encoding="utf-8"))
-        if prev.get("months"):
-            return prev["months"][-1].get("cumNet")
+        return json.loads(OUT_PATH.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning("Could not read existing summary.json: %s", e)
-    return None
+        return None
 
 
-def _existing_grosses():
-    """Return { 'Mon YYYY': gross } from the on-disk summary.json, or {}."""
-    if not OUT_PATH.exists():
-        return {}
-    try:
-        prev = json.loads(OUT_PATH.read_text(encoding="utf-8"))
-        return {
-            m["month"]: m.get("gross")
-            for m in prev.get("months", [])
-            if m.get("month")
-        }
-    except Exception as e:
-        logger.warning("Could not read existing summary.json: %s", e)
-        return {}
-
-
-def _gross_regressions(payload):
-    """Months where previous gross was positive but new gross is 0/missing."""
-    prev = _existing_grosses()
+def _gross_regressions(prev, payload):
+    """Months where prev gross was positive but new gross is 0/missing."""
     if not prev:
         return []
+    prev_by_month = {
+        m["month"]: m.get("gross") for m in prev.get("months", []) if m.get("month")
+    }
     new_by_month = {m["month"]: m.get("gross") for m in payload["months"]}
     violations = []
-    for month, prev_gross in prev.items():
+    for month, prev_gross in prev_by_month.items():
         if not isinstance(prev_gross, (int, float)) or prev_gross <= 0:
             continue
         new_gross = new_by_month.get(month)
@@ -307,60 +287,98 @@ def _gross_regressions(payload):
     return violations
 
 
-def _email_cumnet_drift(prev_cum, new_cum, drop, *, aborted):
+def _fmt_change(prev_v, new_v):
+    """'a -> b (+delta)' / 'b (unchanged)' / '(none) -> b' style formatter."""
+    if prev_v is None and new_v is None:
+        return "(none)"
+    if prev_v is None:
+        return f"(none) -> {new_v}"
+    if new_v is None:
+        return f"{prev_v} -> (none)"
+    if prev_v == new_v:
+        return f"{new_v} (unchanged)"
+    return f"{prev_v} -> {new_v} ({new_v - prev_v:+g})"
+
+
+def _changed_rows(prev, payload):
+    """List of (month, [(field, prev_v, new_v), ...]) where any tracked field differs."""
+    prev_by_month = (
+        {m["month"]: m for m in prev.get("months", [])} if prev else {}
+    )
+    rows = []
+    for new_rec in payload["months"]:
+        prev_rec = prev_by_month.get(new_rec["month"], {})
+        diffs = [
+            (f, prev_rec.get(f), new_rec.get(f))
+            for f in TRACKED_FIELDS
+            if prev_rec.get(f) != new_rec.get(f)
+        ]
+        if diffs:
+            rows.append((new_rec["month"], diffs))
+    return rows
+
+
+def _email_run_summary(prev, payload):
     sender    = os.environ.get("EMAIL_SENDER", "")
     password  = os.environ.get("EMAIL_PASSWORD", "")
     recipient = os.environ.get("EMAIL_RECIPIENT", "jd@projecthelp.co.za")
     if not sender or not password:
         logger.warning(
-            "EMAIL_SENDER / EMAIL_PASSWORD not set — skipping cumNet drift alert"
+            "EMAIL_SENDER / EMAIL_PASSWORD not set — skipping run summary email"
         )
         return
 
-    if aborted:
-        subject = (
-            f"VW Dashboard — cumNet dropped {drop} policies, sync aborted"
-        )
-        body = (
-            "Hi JD,\n\n"
-            "export_summary.py refused to write docs/data/summary.json "
-            f"because cumNet dropped by {drop} policies "
-            f"({prev_cum} -> {new_cum}), exceeding the "
-            f"{CUMNET_ABORT_THRESHOLD}-policy abort threshold.\n\n"
-            "The dashboard has been left on its previous values. "
-            "Inspect the DASHBOARD/MASTER_BOOK tab for missing or zeroed "
-            "rows. If the drop is legitimate (e.g. a mass retroactive "
-            "cancellation), re-run the workflow with force_overwrite=true "
-            "to bypass the guard.\n\n"
-            "— VW Sales Automation"
-        )
+    new_latest = payload["months"][-1]
+    new_cum    = new_latest.get("cumNet")
+    new_rev    = new_latest.get("totalRevCum")
+    if prev and prev.get("months"):
+        prev_latest = prev["months"][-1]
+        prev_cum    = prev_latest.get("cumNet")
+        prev_rev    = prev_latest.get("totalRevCum")
     else:
-        subject = (
-            f"VW Dashboard — cumNet drifted -{drop} (informational)"
-        )
-        body = (
-            "Hi JD,\n\n"
-            "export_summary.py wrote summary.json normally, but cumNet "
-            f"drifted down by {drop} policies ({prev_cum} -> {new_cum}). "
-            f"Within the {CUMNET_ABORT_THRESHOLD}-policy tolerance, so "
-            "proceeded automatically.\n\n"
-            "Likely cause: retroactive cancellations being applied to "
-            "past sale months. No action required — just visibility.\n\n"
-            "— VW Sales Automation"
-        )
+        prev_cum = prev_rev = None
+
+    rows = _changed_rows(prev, payload)
+
+    # Subject line
+    if prev_cum is None or new_cum is None:
+        cum_part = f"cumNet {new_cum if new_cum is not None else 'n/a'}"
+    elif new_cum == prev_cum:
+        cum_part = f"cumNet {new_cum} (unchanged)"
+    else:
+        cum_part = f"cumNet {prev_cum}→{new_cum} ({new_cum - prev_cum:+d})"
+    subject = f"VW Dashboard sync — {cum_part}, {len(rows)} month rows changed"
+
+    # Body
+    lines = [
+        "Hi JD,",
+        "",
+        f"Run timestamp: {payload['lastUpdated']}",
+        "",
+        f"cumNet:      {_fmt_change(prev_cum, new_cum)}",
+        f"totalRevCum: {_fmt_change(prev_rev, new_rev)}",
+        "",
+        f"Months changed: {len(rows)}",
+    ]
+    for month, diffs in rows:
+        lines.append("")
+        lines.append(f"  {month}:")
+        for f, p, n in diffs:
+            lines.append(f"    {f}: {_fmt_change(p, n)}")
+    lines += ["", "— VW Sales Automation"]
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"]    = sender
     msg["To"]      = recipient
-    msg.set_content(body)
+    msg.set_content("\n".join(lines))
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(sender, password)
             smtp.send_message(msg)
-        logger.info("cumNet drift alert sent → %s", recipient)
+        logger.info("Run summary email sent → %s", recipient)
     except Exception as e:
-        logger.error("Failed to send cumNet drift alert: %s", e)
+        logger.error("Failed to send run summary email: %s", e)
 
 
 def _email_gross_regression(violations):
@@ -413,15 +431,14 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)],
     )
     payload = build_payload()
+    prev    = _load_existing()
 
     if FORCE_OVERWRITE:
         logger.warning(
-            "FORCE_OVERWRITE=true — bypassing safety guards (caller has "
-            "manually confirmed the regression)"
+            "FORCE_OVERWRITE=true — bypassing gross-regression guard"
         )
     else:
-        # Guard 1: gross-regression on any past month (primary signal)
-        violations = _gross_regressions(payload)
+        violations = _gross_regressions(prev, payload)
         if violations:
             detail = "; ".join(
                 f"{m} ({pg} → {ng if ng is not None else 'missing'})"
@@ -435,31 +452,6 @@ def main():
             if not DRY_RUN:
                 _email_gross_regression(violations)
             sys.exit(2)
-
-        # Guard 2: cumNet drift (secondary backstop, threshold-based)
-        new_cum  = payload["months"][-1].get("cumNet")
-        prev_cum = _existing_cumnet()
-        if (prev_cum is not None and new_cum is not None
-                and new_cum < prev_cum):
-            drop = prev_cum - new_cum
-            if drop > CUMNET_ABORT_THRESHOLD:
-                logger.error(
-                    "SAFETY GUARD: cumNet dropped %d policies (%s -> %s), "
-                    "exceeds %d-policy abort threshold — aborting. Re-run "
-                    "with force_overwrite=true if this drop is legitimate.",
-                    drop, prev_cum, new_cum, CUMNET_ABORT_THRESHOLD,
-                )
-                if not DRY_RUN:
-                    _email_cumnet_drift(prev_cum, new_cum, drop, aborted=True)
-                sys.exit(2)
-            else:
-                logger.warning(
-                    "cumNet dropped %d policies (%s -> %s) — within "
-                    "%d-policy tolerance, proceeding",
-                    drop, prev_cum, new_cum, CUMNET_ABORT_THRESHOLD,
-                )
-                if not DRY_RUN:
-                    _email_cumnet_drift(prev_cum, new_cum, drop, aborted=False)
 
     json_str = json.dumps(payload, indent=2, ensure_ascii=False)
     latest   = payload["months"][-1]
@@ -477,6 +469,8 @@ def main():
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json_str + "\n", encoding="utf-8")
     logger.info("Wrote %s", OUT_PATH)
+
+    _email_run_summary(prev, payload)
 
 
 if __name__ == "__main__":
