@@ -5,6 +5,12 @@ on:
     - cron: "13 15 * * 1"
 
   workflow_dispatch:
+    inputs:
+      force_overwrite:
+        description: "Bypass export_summary.py safety guards (use only after manually confirming the regression)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -47,6 +53,10 @@ jobs:
       - name: Export summary data to JSON
         env:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+          FORCE_OVERWRITE:           ${{ github.event.inputs.force_overwrite || 'false' }}
         run: python scripts/export_summary.py
 
       - name: Commit dashboard data to repo
