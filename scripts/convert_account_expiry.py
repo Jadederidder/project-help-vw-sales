@@ -43,7 +43,7 @@ import os
 import re
 import smtplib
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 
 from google.oauth2.service_account import Credentials
@@ -132,17 +132,55 @@ def _col_letter(idx_0):
 
 
 def _parse_date_loose(s):
-    """Parse the EFFECTIVE DATE column ('2026/04/29' / '2026-04-29' / blank)
-    into a date, or None."""
-    s = str(s or "").strip()
-    if not s:
+    """Parse a sheet date cell into a date, or None.
+
+    Accepts three input shapes:
+      1. Excel/Sheets serial number (int/float days since 1899-12-30) — this
+         is what the Sheets API returns under valueRenderOption=UNFORMATTED_VALUE
+         for date-formatted cells. e.g. 45919 → 2025-09-19. read_tab uses
+         UNFORMATTED_VALUE to keep account-number cells from rendering as
+         scientific notation, so EFFECTIVE DATE arrives here as an int.
+      2. Date strings: 'YYYY/MM/DD', 'YYYY-MM-DD', 'DD/MM/YYYY', 'DD-MM-YYYY'.
+      3. Numeric string serials ('45919' / '45919.0') — defensive.
+    """
+    if s is None or s == "":
         return None
+
+    # Shape 1: native int/float serial number from UNFORMATTED_VALUE
+    if isinstance(s, (int, float)) and not isinstance(s, bool):
+        return _excel_serial_to_date(s)
+
+    s_str = str(s).strip()
+    if not s_str:
+        return None
+
+    # Shape 2: date strings
     for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
-            return datetime.strptime(s, fmt).date()
+            return datetime.strptime(s_str, fmt).date()
         except ValueError:
             continue
+
+    # Shape 3: numeric string fallback
+    try:
+        f = float(s_str)
+        # Plausible date-serial range (~1900 through ~2173)
+        if 1 <= f <= 100000:
+            return _excel_serial_to_date(f)
+    except (ValueError, TypeError):
+        pass
+
     return None
+
+
+def _excel_serial_to_date(n):
+    """Convert an Excel/Sheets date serial to a date. Sheets uses the
+    1900 system: serial 0 = 1899-12-30 (the off-by-one accounting for
+    Lotus 1-2-3's incorrect Feb 29 1900 doesn't apply for serials >= 60)."""
+    try:
+        return date(1899, 12, 30) + timedelta(days=int(n))
+    except (OverflowError, ValueError):
+        return None
 
 
 def _today_iso():
@@ -817,10 +855,26 @@ def main():
                 err = row[rej_idx["ERROR MESSAGE"]] if rej_idx["ERROR MESSAGE"] is not None else ""
                 if not is_account_expiry(err):
                     continue
-                eff_date = _parse_date_loose(
-                    row[rej_idx["EFFECTIVE DATE"]] if rej_idx["EFFECTIVE DATE"] is not None else ""
+                raw_eff = (row[rej_idx["EFFECTIVE DATE"]]
+                           if rej_idx["EFFECTIVE DATE"] is not None else "")
+                eff_date = _parse_date_loose(raw_eff)
+                # Per-row decision log — single digits per day so verbose is fine
+                # and future date-format bugs are trivial to diagnose from the
+                # workflow log alone.
+                if eff_date is None:
+                    logger.warning(
+                        "  row=%d  could not parse EFFECTIVE DATE %r "
+                        "(type=%s) — skipping for safety",
+                        row_i, raw_eff, type(raw_eff).__name__,
+                    )
+                    n_skipped_old += 1
+                    continue
+                decision = "skip" if eff_date < backfill_from else "process"
+                logger.info(
+                    "  row=%d  raw=%r  parsed=%s  vs backfill_from=%s  decision=%s",
+                    row_i, raw_eff, eff_date, backfill_from, decision,
                 )
-                if eff_date and eff_date < backfill_from:
+                if decision == "skip":
                     n_skipped_old += 1
                     continue
                 # Skip terminal-state rows. Per spec v1.5, only CONVERTED
