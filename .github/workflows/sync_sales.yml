@@ -56,3 +56,12 @@ jobs:
           git add docs/data/accounts.json docs/data/summary.json
           git diff --staged --quiet || git commit -m "chore: refresh dashboard data"
           git push
+
+      - name: Re-check PENDING_CONVERSIONS (weekly maintenance)
+        env:
+          REVIO_API_KEY:             ${{ secrets.REVIO_API_KEY }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+        run: python scripts/convert_account_expiry.py --pending-recheck-only
