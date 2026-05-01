@@ -75,9 +75,12 @@ jobs:
 
       - name: Re-check PENDING_CONVERSIONS (weekly maintenance)
         env:
-          REVIO_API_KEY:             ${{ secrets.REVIO_API_KEY }}
-          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
-          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+          REVIO_API_KEY:                ${{ secrets.REVIO_API_KEY }}
+          REVIO_BRAND_ID:               ${{ secrets.REVIO_BRAND_ID }}
+          REVIO_TEMPLATE_VW_SINGLE_ID:  ${{ secrets.REVIO_TEMPLATE_VW_SINGLE_ID }}
+          REVIO_TEMPLATE_VW_FAMILY_ID:  ${{ secrets.REVIO_TEMPLATE_VW_FAMILY_ID }}
+          GOOGLE_SHEETS_CREDENTIALS:    ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:                 ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:               ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:              ${{ secrets.EMAIL_RECIPIENT }}
         run: python scripts/convert_account_expiry.py --pending-recheck-only

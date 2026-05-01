@@ -57,7 +57,6 @@ from scripts.revio_subscription import (
     compute_next_debit_date,
     create_client,
     resolve_template_id,
-    _load_bt_client_map,
 )
 
 logging.basicConfig(
@@ -370,7 +369,7 @@ def find_rejection_indices(header):
 
 def process_one_rejection(svc, rejection_row, rejection_row_num,
                           h_idx, i_idx, j_idx, rej_idx,
-                          sales_index, template_map, today, dry_run):
+                          sales_index, today, dry_run):
     """Returns one of:
         ('converted', sales_row, scheduled_date, revio_client_id)
         ('pending',   None, None, None)
@@ -408,7 +407,7 @@ def process_one_rejection(svc, rejection_row, rejection_row_num,
                               f"ERROR: {msg}"[:120], dry_run=dry_run)
         return ("error", msg, None, None)
 
-    template_id = resolve_template_id(template_map, product_code)
+    template_id = resolve_template_id(product_code)
     personal_code = "VW-" + str(sales_row.get("Policy Number") or "").strip()
     debit_date_str = sales_row.get("Debit_Order_Date") or ""
     scheduled_date = compute_next_debit_date(debit_date_str, today)
@@ -435,7 +434,7 @@ def process_one_rejection(svc, rejection_row, rejection_row_num,
     return ("converted", sales_row, scheduled_date, client_id)
 
 
-def recheck_pending_conversions(svc, sales_index, template_map, today,
+def recheck_pending_conversions(svc, sales_index, today,
                                 bump_weeks_counter, dry_run):
     """Iterate PENDING_CONVERSIONS, re-attempt SALES match. If match found,
     convert and mark CONVERTED. If bump_weeks_counter (weekly run) and still
@@ -499,7 +498,7 @@ def recheck_pending_conversions(svc, sales_index, template_map, today,
                 logger.warning("PENDING %s has unknown product %r — skipping",
                                acc, product_code)
                 continue
-            template_id = resolve_template_id(template_map, product_code)
+            template_id = resolve_template_id(product_code)
             personal_code = "VW-" + str(sales_row.get("Policy Number") or "").strip()
             scheduled_date = compute_next_debit_date(
                 sales_row.get("Debit_Order_Date") or "", today
@@ -777,15 +776,27 @@ def main():
     pending_header, _ = read_tab(svc, PENDING_TAB)
     ensure_pending_headers(svc, pending_header)
 
-    logger.info("[3/6] Loading Revio billing templates …")
-    if DRY_RUN and not os.environ.get("REVIO_API_KEY"):
-        # Offline dry-run convenience: skip the GET /billing_templates/ call.
-        template_map = {name: f"DRY-{name}" for name, _ in PRODUCT_CONFIG.values()}
-        logger.info("  [DRY RUN — no REVIO_API_KEY] using fake template ids: %s",
-                    template_map)
+    logger.info("[3/6] Validating Revio configuration …")
+    required_revio_env = (
+        "REVIO_API_KEY",
+        "REVIO_BRAND_ID",
+        "REVIO_TEMPLATE_VW_SINGLE_ID",
+        "REVIO_TEMPLATE_VW_FAMILY_ID",
+    )
+    if not DRY_RUN:
+        missing = [k for k in required_revio_env if not os.environ.get(k)]
+        if missing:
+            raise RuntimeError(
+                f"Missing required Revio env vars: {missing}. Add them as "
+                f"GitHub secrets and pass through the workflow env block."
+            )
+        logger.info("  REVIO_API_KEY=set, REVIO_BRAND_ID=set, "
+                    "ALLRHLP+ALLRHFM template ids configured")
     else:
-        template_map = _load_bt_client_map()
-        logger.info("  loaded %d billing templates", len(template_map))
+        # Dry-run: log which env vars are set so JD can verify the workflow
+        # is wiring secrets through correctly even before going live.
+        for k in required_revio_env:
+            logger.info("  %s: %s", k, "set" if os.environ.get(k) else "(unset)")
 
     stats = {
         "converted": 0, "new_pending": 0, "still_pending": 0,
@@ -838,7 +849,7 @@ def main():
 
                 outcome, info, sched, client_id = process_one_rejection(
                     svc, row, row_i, h_idx, i_idx, j_idx, rej_idx,
-                    sales_index, template_map, today, DRY_RUN,
+                    sales_index, today, DRY_RUN,
                 )
                 if outcome == "converted":
                     sales_row = info
@@ -902,7 +913,7 @@ def main():
         logger.info("[5/6] Re-checking PENDING_CONVERSIONS%s …",
                     " (with weekly age-out)" if bump_weeks else "")
         pcounts = recheck_pending_conversions(
-            svc, sales_index, template_map, today,
+            svc, sales_index, today,
             bump_weeks_counter=bump_weeks, dry_run=DRY_RUN,
         )
         stats["converted"] += pcounts["converted"]

@@ -43,12 +43,15 @@ jobs:
 
       - name: Run conversion
         env:
-          REVIO_API_KEY:             ${{ secrets.REVIO_API_KEY }}
-          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
-          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
-          DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
+          REVIO_API_KEY:                ${{ secrets.REVIO_API_KEY }}
+          REVIO_BRAND_ID:               ${{ secrets.REVIO_BRAND_ID }}
+          REVIO_TEMPLATE_VW_SINGLE_ID:  ${{ secrets.REVIO_TEMPLATE_VW_SINGLE_ID }}
+          REVIO_TEMPLATE_VW_FAMILY_ID:  ${{ secrets.REVIO_TEMPLATE_VW_FAMILY_ID }}
+          GOOGLE_SHEETS_CREDENTIALS:    ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:                 ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:               ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:              ${{ secrets.EMAIL_RECIPIENT }}
+          DRY_RUN:                      ${{ github.event.inputs.dry_run || 'false' }}
         run: |
           python scripts/convert_account_expiry.py \
             --backfill-from "${{ github.event.inputs.backfill_from || '2026-04-29' }}"
