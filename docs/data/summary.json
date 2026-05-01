@@ -1,5 +1,5 @@
 {
-  "lastUpdated": "2026-05-01T09:15:01Z",
+  "lastUpdated": "2026-05-01T10:00:35Z",
   "kpis": {
     "netPolicies": 1686,
     "revenue": 153764,
@@ -159,6 +159,23 @@
       "vwInvoice": 31779.65,
       "vwLock": null,
       "rev": 11748
+    },
+    {
+      "month": "May 2026",
+      "gross": 0,
+      "cancel": null,
+      "reject": null,
+      "net": 0,
+      "netInd": 0,
+      "netFam": 0,
+      "cumNet": 1686,
+      "indRev": 0,
+      "famRev": 0,
+      "totalRevCum": 153764,
+      "collected": null,
+      "vwInvoice": 31779.65,
+      "vwLock": null,
+      "rev": null
     }
   ]
 }
