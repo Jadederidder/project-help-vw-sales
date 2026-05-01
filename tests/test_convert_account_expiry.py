@@ -230,6 +230,22 @@ class BuildClientPayload(unittest.TestCase):
         self.assertEqual(p["zip_code"], "7708")
         self.assertEqual(p["street_address"], "13 MONTROSE TERRACE")
 
+    @patch.dict(os.environ, {"REVIO_BRAND_ID": "e73e30ef-197c-4e2c-a4f9-e13483284abb"})
+    def test_brand_id_injected_from_env(self):
+        # v1.6: brand_id is required by Revio docs on POST /clients/.
+        p = rs.build_client_payload(self.sales_row, "VW-SN135075")
+        self.assertEqual(p["brand_id"], "e73e30ef-197c-4e2c-a4f9-e13483284abb")
+
+    def test_brand_id_blank_when_env_unset(self):
+        # Defensive: still emit the key even if env var is missing —
+        # Revio will then 400 with a clear validation error rather than
+        # silently dropping the field. main()'s pre-flight catches this
+        # before any POST is made in non-DRY_RUN.
+        os.environ.pop("REVIO_BRAND_ID", None)
+        p = rs.build_client_payload(self.sales_row, "VW-SN135075")
+        self.assertIn("brand_id", p)
+        self.assertEqual(p["brand_id"], "")
+
     def test_blank_city_falls_back_to_suburb(self):
         p = rs.build_client_payload(self.sales_row, "VW-SN135075")
         self.assertEqual(p["city"], "BISHOPSCOURT")
@@ -246,25 +262,52 @@ class BuildClientPayload(unittest.TestCase):
 
 
 class ResolveTemplate(unittest.TestCase):
-    def test_allrhlp_resolves(self):
-        m = {"VW Premium HELP Single": "abc-id-1",
-             "VW Premium HELP Family": "abc-id-2",
-             "Other Template":         "abc-id-3"}
-        self.assertEqual(rs.resolve_template_id(m, "ALLRHLP"), "abc-id-1")
+    """v1.6: template UUIDs come from env vars (REVIO_TEMPLATE_VW_SINGLE_ID,
+    REVIO_TEMPLATE_VW_FAMILY_ID), not from a /billing_templates/ enumeration.
+    Tests patch os.environ to assert the lookup wires through correctly."""
 
-    def test_allrhfm_resolves(self):
-        m = {"VW Premium HELP Single": "abc-id-1",
-             "VW Premium HELP Family": "abc-id-2"}
-        self.assertEqual(rs.resolve_template_id(m, "ALLRHFM"), "abc-id-2")
+    @patch.dict(os.environ, {
+        "REVIO_TEMPLATE_VW_SINGLE_ID": "7befa418-0508-4d81-91ab-e077a65cb872",
+        "REVIO_TEMPLATE_VW_FAMILY_ID": "018dd06c-475c-4cf5-afc9-da2e1b5218b1",
+    })
+    def test_allrhlp_resolves_from_env(self):
+        self.assertEqual(
+            rs.resolve_template_id("ALLRHLP"),
+            "7befa418-0508-4d81-91ab-e077a65cb872",
+        )
+
+    @patch.dict(os.environ, {
+        "REVIO_TEMPLATE_VW_SINGLE_ID": "7befa418-0508-4d81-91ab-e077a65cb872",
+        "REVIO_TEMPLATE_VW_FAMILY_ID": "018dd06c-475c-4cf5-afc9-da2e1b5218b1",
+    })
+    def test_allrhfm_resolves_from_env(self):
+        self.assertEqual(
+            rs.resolve_template_id("ALLRHFM"),
+            "018dd06c-475c-4cf5-afc9-da2e1b5218b1",
+        )
 
     def test_unknown_product_raises(self):
-        with self.assertRaises(RuntimeError):
-            rs.resolve_template_id({}, "ALLNOPE")
-
-    def test_missing_template_raises(self):
         with self.assertRaises(RuntimeError) as ctx:
-            rs.resolve_template_id({"Other": "x"}, "ALLRHLP")
-        self.assertIn("VW Premium HELP Single", str(ctx.exception))
+            rs.resolve_template_id("ALLNOPE")
+        self.assertIn("ALLNOPE", str(ctx.exception))
+
+    @patch.dict(os.environ, {"REVIO_TEMPLATE_VW_SINGLE_ID": ""}, clear=False)
+    def test_missing_env_var_raises_with_clear_diagnostic(self):
+        # Wipe the var if anything in the test runner set it
+        os.environ.pop("REVIO_TEMPLATE_VW_SINGLE_ID", None)
+        with self.assertRaises(RuntimeError) as ctx:
+            rs.resolve_template_id("ALLRHLP")
+        self.assertIn("REVIO_TEMPLATE_VW_SINGLE_ID", str(ctx.exception))
+
+    @patch.dict(os.environ, {
+        "REVIO_TEMPLATE_VW_SINGLE_ID": "single-id",
+        "REVIO_TEMPLATE_VW_FAMILY_ID": "family-id",
+    })
+    def test_no_billing_templates_api_call_made(self):
+        # The whole point of v1.6: resolve_template_id must NOT hit the API.
+        with patch.object(rs.requests, "get") as mock_get:
+            rs.resolve_template_id("ALLRHLP")
+            mock_get.assert_not_called()
 
 
 # ─── REJECTIONS H/J state machine — pure transition rules ──────────────────

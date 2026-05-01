@@ -40,12 +40,22 @@ REVIO_API_BASE_URL = os.environ.get(
 )
 REVIO_API_KEY = os.environ.get("REVIO_API_KEY", "")
 
-# ALLRHLP / ALLRHFM → (billing_template name on Revio, monthly price in ZAR).
-# Template IDs are resolved at runtime via _load_bt_client_map; never hardcode.
+# ALLRHLP / ALLRHFM → (env var holding the Revio billing-template UUID,
+# monthly price in ZAR). Template IDs come from per-environment GitHub
+# secrets — JD pulled the exact UUIDs from the Revio portal so we no
+# longer enumerate /billing_templates/ at runtime (which was both
+# fragile across template-name suffix drift and slow).
 PRODUCT_CONFIG = {
-    "ALLRHLP": ("VW Premium HELP Single", 89),
-    "ALLRHFM": ("VW Premium HELP Family", 159),
+    "ALLRHLP": ("REVIO_TEMPLATE_VW_SINGLE_ID", 89),
+    "ALLRHFM": ("REVIO_TEMPLATE_VW_FAMILY_ID", 159),
 }
+
+
+def _brand_id():
+    """Revio docs require brand_id on POST /clients/ and on
+    POST /billing_templates/{id}/add_subscriber/. Read at call-time so
+    tests can patch via os.environ."""
+    return os.environ.get("REVIO_BRAND_ID", "")
 
 DAY_28_FALLBACK = 28
 
@@ -157,7 +167,7 @@ def build_client_payload(sales_row, personal_code):
     """Map a SALES-row dict (header-keyed) → POST /clients/ payload.
 
     Caller is responsible for sales_row keys matching the live SALES headers.
-    See SALES_HEADER_KEYS in convert_account_expiry.py.
+    `brand_id` is sourced from REVIO_BRAND_ID env var (required by Revio docs).
     """
     city = (sales_row.get("Physical City") or "").strip() \
         or (sales_row.get("Physical Suburb") or "").strip()
@@ -174,6 +184,7 @@ def build_client_payload(sales_row, personal_code):
         "street_address": build_street_address(
             sales_row.get("Physical Line1"), sales_row.get("Physical Line2")
         ),
+        "brand_id":       _brand_id(),
     }
 
 
@@ -299,43 +310,22 @@ def is_already_subscriber(template_id, client_id):
     return False
 
 
-def _load_bt_client_map():
-    """Pre-load all billing templates → {template_name: template_id}.
+def resolve_template_id(product_code):
+    """ALLRHLP / ALLRHFM → Revio billing-template UUID from env var.
 
-    Mirrors the pattern in project-help-collections/scripts/revio_api.py
-    (_load_bt_client_map), but we only need the template index, not the
-    full client membership map. One pass over /billing_templates/.
+    Replaces the old "GET /billing_templates/ + match by name" pattern,
+    which was fragile across template-name suffix drift. JD pulled the
+    exact UUIDs from the Revio portal; they live in GitHub secrets.
     """
-    out = {}
-    url = REVIO_API_BASE_URL + "/billing_templates/"
-    while url:
-        r = requests.get(url, headers=_get_headers(), timeout=60)
-        if r.status_code != 200:
-            raise RuntimeError(
-                f"GET /billing_templates/ failed: {r.status_code} {r.text[:200]}"
-            )
-        data = r.json()
-        results = data.get("results", data) if isinstance(data, dict) else data
-        for t in results or []:
-            tid, tname = t.get("id"), t.get("name")
-            if tid and tname:
-                out[tname] = tid
-        url = data.get("next") if isinstance(data, dict) else None
-        time.sleep(0.1)
-    return out
-
-
-def resolve_template_id(template_name_to_id, product_code):
-    """ALLRHLP / ALLRHFM → template_id, or raise with a clear diagnostic."""
     cfg = PRODUCT_CONFIG.get(product_code)
     if not cfg:
         raise RuntimeError(f"Unknown product code: {product_code!r}")
-    template_name, _price = cfg
-    tid = template_name_to_id.get(template_name)
+    env_var, _price = cfg
+    tid = os.environ.get(env_var, "")
     if not tid:
         raise RuntimeError(
-            f"Billing template {template_name!r} not found in Revio. "
-            f"Known templates: {sorted(template_name_to_id.keys())}"
+            f"{env_var} is not set — required to resolve Revio billing "
+            f"template for product {product_code!r}"
         )
     return tid
 
@@ -400,6 +390,7 @@ def add_subscriber(template_id, client_id, scheduled_date,
         "subscription_billing_scheduled_on":    scheduled_date,  # YYYY-MM-DD
         "invoice_reference":                    invoice_reference,
         "send_invoice_on_add_subscriber":       True,
+        "brand_id":                             _brand_id(),
     }
     if dry_run:
         logger.info("[DRY RUN] POST /billing_templates/%s/add_subscriber/ payload=%s",
