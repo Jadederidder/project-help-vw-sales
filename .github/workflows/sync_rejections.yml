@@ -60,13 +60,32 @@ jobs:
           EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
         run: python scripts/export_summary.py
 
+      - name: Write deploy-check smoke-test endpoint
+        # Stamps docs/data/deploy_check.json with the run timestamp + the
+        # workflow's trigger commit so JD can curl one URL to verify
+        # auto-deploy is firing without inspecting the whole dashboard.
+        # commit_sha is the *trigger* commit (GITHUB_SHA at workflow start),
+        # not the chore commit that actually carries this file — the chore
+        # commit's sha is unknowable in advance. The two are at most one
+        # commit apart in practice.
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          mkdir -p docs/data
+          cat > docs/data/deploy_check.json <<EOF
+          {
+            "last_deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "source_workflow": "sync_rejections",
+            "commit_sha": "${GITHUB_SHA:0:7}"
+          }
+          EOF
+
       - name: Commit dashboard data to repo
         id: commit
         if: ${{ github.event.inputs.dry_run != 'true' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/data/summary.json
+          git add docs/data/summary.json docs/data/deploy_check.json
           if git diff --staged --quiet; then
             echo "committed=false" >> "$GITHUB_OUTPUT"
           else
