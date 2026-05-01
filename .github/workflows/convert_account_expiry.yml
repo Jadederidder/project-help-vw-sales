@@ -1,0 +1,54 @@
+name: Daily VW ACCOUNT EXPIRY → Revio Conversion
+
+on:
+  schedule:
+    # 04:08 SAST = 02:08 UTC. 3 min after sync_rejections (02:05 UTC) which
+    # populates the REJECTIONS tab; 2 min before cancel_casi_revio (02:10 UTC).
+    - cron: "8 2 * * *"
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — no Revio calls, no sheet writes, email jd only"
+        required: false
+        default: false
+        type: boolean
+      backfill_from:
+        description: "Filter REJECTIONS by EFFECTIVE DATE >= this (YYYY-MM-DD)"
+        required: false
+        default: "2026-04-29"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    name: Convert ACCOUNT EXPIRY rejections to Revio debit orders
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run conversion
+        env:
+          REVIO_API_KEY:             ${{ secrets.REVIO_API_KEY }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+          DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          python scripts/convert_account_expiry.py \
+            --backfill-from "${{ github.event.inputs.backfill_from || '2026-04-29' }}"
