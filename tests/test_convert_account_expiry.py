@@ -739,6 +739,78 @@ class ParseDateLoose(unittest.TestCase):
     def test_unparseable(self):
         self.assertIsNone(cae._parse_date_loose("garbage"))
 
+    # ─── Excel/Sheets serial number — the bug fix ──────────────────────────
+    # read_tab uses valueRenderOption=UNFORMATTED_VALUE so date-formatted
+    # cells arrive here as int days-since-1899-12-30, not strings. The
+    # 9-row backfill regression on the live sheet was caused by this
+    # parser silently returning None for ints, which let every ACCOUNT
+    # EXPIRY row through the backfill_from filter.
+
+    def test_int_serial_is_parsed_as_date(self):
+        # 45919 = the actual value Sheets returned for the 2025-09-19 row
+        self.assertEqual(cae._parse_date_loose(45919), date(2025, 9, 19))
+
+    def test_int_serial_for_recent_dates(self):
+        # 45933 → 2025-10-03, 45966 → 2025-11-05 (also from the live sheet)
+        self.assertEqual(cae._parse_date_loose(45933), date(2025, 10, 3))
+        self.assertEqual(cae._parse_date_loose(45966), date(2025, 11, 5))
+
+    def test_int_serial_for_2026_backfill_row(self):
+        # 2026-04-29 → serial 46141
+        self.assertEqual(cae._parse_date_loose(46141), date(2026, 4, 29))
+
+    def test_float_serial(self):
+        # Some integrations stringify-then-parse-back; cover the float path
+        self.assertEqual(cae._parse_date_loose(45919.0), date(2025, 9, 19))
+
+    def test_numeric_string_serial(self):
+        # Defensive: if a tool stringified the int before reaching us
+        self.assertEqual(cae._parse_date_loose("45919"), date(2025, 9, 19))
+        self.assertEqual(cae._parse_date_loose("45919.0"), date(2025, 9, 19))
+
+    def test_bool_is_not_treated_as_serial(self):
+        # bool is a subclass of int in Python — guard against True → 1899-12-31
+        self.assertIsNone(cae._parse_date_loose(True))
+        self.assertIsNone(cae._parse_date_loose(False))
+
+    def test_zero_returns_epoch_origin(self):
+        # Edge case: serial 0 is the Excel/Sheets epoch origin
+        self.assertEqual(cae._parse_date_loose(0), date(1899, 12, 30))
+
+    def test_string_format_takes_precedence_over_serial(self):
+        # If a string also looks like a number it should be tried as a
+        # date string first (none match, then serial fallback applies).
+        # '20251019' is not a valid date format we accept, so it falls
+        # through to numeric → would be a future serial year → None.
+        self.assertIsNone(cae._parse_date_loose("20251019"))
+
+    def test_backfill_filter_full_scenario(self):
+        # End-to-end: with the live UNFORMATTED_VALUE serials, the filter
+        # correctly partitions the 9 ACCOUNT EXPIRY rows around the
+        # 2026-04-29 backfill cutoff.
+        backfill_from = date(2026, 4, 29)
+        live_serials = {
+            "2025-09-19 #1": 45919,
+            "2025-09-19 #2": 45919,
+            "2025-09-19 #3": 45919,
+            "2025-10-03":    45933,
+            "2025-10-27":    45957,
+            "2025-11-05":    45966,
+            "2026-04-29 #1": 46141,
+            "2026-04-29 #2": 46141,
+            "2026-04-30":    46142,
+        }
+        skipped = []
+        processed = []
+        for label, serial in live_serials.items():
+            d = cae._parse_date_loose(serial)
+            self.assertIsNotNone(d, msg=f"failed to parse {label}")
+            (skipped if d < backfill_from else processed).append(label)
+        # 6 historical rows skipped, 3 recent rows processed — matches
+        # JD's expected output from the dry_run.
+        self.assertEqual(len(skipped), 6)
+        self.assertEqual(len(processed), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
