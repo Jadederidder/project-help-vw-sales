@@ -16,7 +16,8 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
+  actions:  write
 
 jobs:
   cancel:
@@ -27,6 +28,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v6
@@ -48,6 +51,36 @@ jobs:
           EMAIL_RECIPIENT:           "jd@projecthelp.io"
           DRY_RUN:                   ${{ github.event.inputs.dry_run || 'false' }}
         run: python scripts/cancel_casi_revio.py
+
+      - name: Export summary data to JSON
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           "jd@projecthelp.io"
+        run: python scripts/export_summary.py
+
+      - name: Commit dashboard data to repo
+        id: commit
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/data/summary.json
+          if git diff --staged --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: refresh dashboard data after Casi cancellations"
+            git push
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger Pages deploy
+        if: steps.commit.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy_pages.yml --ref main
 
       - name: Notify on failure
         if: failure()

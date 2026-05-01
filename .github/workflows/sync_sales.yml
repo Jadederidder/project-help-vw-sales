@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions:  write
 
 jobs:
   sync-sales:
@@ -47,15 +48,30 @@ jobs:
       - name: Export summary data to JSON
         env:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
         run: python scripts/export_summary.py
 
       - name: Commit dashboard data to repo
+        id: commit
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/data/accounts.json docs/data/summary.json
-          git diff --staged --quiet || git commit -m "chore: refresh dashboard data"
-          git push
+          if git diff --staged --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: refresh dashboard data"
+            git push
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger Pages deploy
+        if: steps.commit.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy_pages.yml --ref main
 
       - name: Re-check PENDING_CONVERSIONS (weekly maintenance)
         env:

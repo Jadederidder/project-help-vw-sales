@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: write
+  actions:  write
 
 jobs:
   sync:
@@ -61,11 +62,32 @@ jobs:
           DIAGNOSTIC:                ${{ github.event.inputs.diagnostic || 'false' }}
         run: python scripts/sync_cancellations.py
 
-      - name: Commit processed-emails state
+      - name: Export summary data to JSON
+        if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.diagnostic != 'true' }}
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+        run: python scripts/export_summary.py
+
+      - name: Commit processed-emails state and dashboard data
+        id: commit
         if: ${{ github.event.inputs.dry_run != 'true' && github.event.inputs.diagnostic != 'true' }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state/processed_emails.json
-          git diff --staged --quiet || git commit -m "chore: update processed cancellation emails state"
-          git push
+          git add state/processed_emails.json docs/data/summary.json
+          if git diff --staged --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: update cancellation state and refresh dashboard"
+            git push
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger Pages deploy
+        if: steps.commit.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy_pages.yml --ref main
