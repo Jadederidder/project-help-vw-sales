@@ -1,9 +1,9 @@
 {
-  "lastUpdated": "2026-05-01T03:52:15Z",
+  "lastUpdated": "2026-05-01T03:57:44Z",
   "kpis": {
-    "netPolicies": 1687,
-    "revenue": 153853,
-    "churnPct": 9.4,
+    "netPolicies": 1686,
+    "revenue": 153764,
+    "churnPct": 9.5,
     "rejectionPct": 3.7
   },
   "months": [
@@ -146,19 +146,19 @@
     {
       "month": "Apr 2026",
       "gross": 140,
-      "cancel": 4,
+      "cancel": 5,
       "reject": 3,
-      "net": 133,
-      "netInd": 133,
+      "net": 132,
+      "netInd": 132,
       "netFam": 0,
-      "cumNet": 1687,
-      "indRev": 11837,
+      "cumNet": 1686,
+      "indRev": 11748,
       "famRev": 0,
-      "totalRevCum": 153853,
+      "totalRevCum": 153764,
       "collected": null,
-      "vwInvoice": 31798.04,
+      "vwInvoice": 31779.65,
       "vwLock": null,
-      "rev": 11837
+      "rev": 11748
     }
   ]
 }
