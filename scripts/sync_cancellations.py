@@ -362,9 +362,10 @@ def build_summary_excel(new_rows):
     return bio.read()
 
 
-def send_heartbeat_email(run_date, dry_run=False):
-    """Sent when IMAP returned no matching emails in the lookback window —
-    distinguishable subject (`[HEARTBEAT]`) so JD can filter."""
+def send_heartbeat_email(run_date, reason, dry_run=False):
+    """Sent when there's nothing meaningful to process — distinguishable
+    subject (`[HEARTBEAT]`) so JD can filter. `reason` is a one-line body
+    explaining which heartbeat case fired."""
     sender  = os.environ.get("EMAIL_SENDER")
     pwd     = os.environ.get("EMAIL_PASSWORD")
     recip_s = os.environ.get("EMAIL_RECIPIENT", "")
@@ -380,13 +381,13 @@ def send_heartbeat_email(run_date, dry_run=False):
         return
 
     date_label = run_date.strftime("%d %b %Y")
-    subject = f"[HEARTBEAT] VW Cancellations — no email today ({date_label})"
+    subject = f"[HEARTBEAT] VW Cancellations — nothing to process ({date_label})"
     if dry_run:
         subject = f"[DRY RUN] {subject}"
     body = (
         f"VW/Audi Cancellations daily sync — {date_label}\n"
         "\n"
-        "  No Wesbank email today — nothing to process.\n"
+        f"  {reason}\n"
         f"  Lookback window: {SEARCH_DAYS} days.\n"
         "\n"
         "  Workflow exited cleanly (no sheet writes, no state update).\n"
@@ -508,15 +509,20 @@ def main():
     logger.info("State: %d previously-processed email(s)", len(processed_ids))
 
     mails = fetch_cancellation_emails(username, password)
-
-    if not mails and not DIAGNOSTIC:
-        logger.info("No matching emails in last %d days — sending heartbeat and exiting cleanly",
-                    SEARCH_DAYS)
-        send_heartbeat_email(run_date=run_date, dry_run=DRY_RUN)
-        return
-
     unseen = [m for m in mails if m["msg_id"] and m["msg_id"] not in processed_ids]
-    logger.info("Unprocessed matching emails: %d (of %d found)", len(unseen), len(mails))
+    logger.info("Matching emails: %d (of those, %d unprocessed)", len(mails), len(unseen))
+
+    if not unseen and not DIAGNOSTIC:
+        if not mails:
+            reason = "No Wesbank email today — nothing to process."
+            logger.info("No matching emails in last %d days — sending heartbeat and exiting cleanly",
+                        SEARCH_DAYS)
+        else:
+            reason = "No new Wesbank emails — most recent already processed."
+            logger.info("All %d matching email(s) already in processed_emails.json — "
+                        "sending heartbeat and exiting cleanly", len(mails))
+        send_heartbeat_email(run_date=run_date, reason=reason, dry_run=DRY_RUN)
+        return
 
     if DIAGNOSTIC:
         for m in mails:
