@@ -316,9 +316,10 @@ def append_rows(service, aligned):
 
 
 # ─── Summary email ───────────────────────────────────────────────────────────
-def send_heartbeat_email(run_date, dry_run=False):
-    """Sent when IMAP returned no matching emails in the lookback window —
-    distinguishable subject (`[HEARTBEAT]`) so JD can filter."""
+def send_heartbeat_email(run_date, reason, dry_run=False):
+    """Sent when there's nothing meaningful to process — distinguishable
+    subject (`[HEARTBEAT]`) so JD can filter. `reason` is a one-line body
+    explaining which heartbeat case fired."""
     sender  = os.environ.get("EMAIL_SENDER")
     pwd     = os.environ.get("EMAIL_PASSWORD")
     recip_s = os.environ.get("EMAIL_RECIPIENT", "")
@@ -334,13 +335,13 @@ def send_heartbeat_email(run_date, dry_run=False):
         return
 
     date_label = run_date.strftime("%d %b %Y")
-    subject = f"[HEARTBEAT] VW Rejections — no email today ({date_label})"
+    subject = f"[HEARTBEAT] VW Rejections — nothing to process ({date_label})"
     if dry_run:
         subject = f"[DRY RUN] {subject}"
     body = (
         f"VW/Audi Rejections daily sync — {date_label}\n"
         "\n"
-        "  No Wesbank email today — nothing to process.\n"
+        f"  {reason}\n"
         f"  Lookback window: {SEARCH_DAYS} days.\n"
         "\n"
         "  Workflow exited cleanly (no sheet writes).\n"
@@ -452,7 +453,11 @@ def main():
     if not mails:
         logger.info("No matching emails in last %d days — sending heartbeat and exiting cleanly",
                     SEARCH_DAYS)
-        send_heartbeat_email(run_date=run_date, dry_run=DRY_RUN)
+        send_heartbeat_email(
+            run_date=run_date,
+            reason="No Wesbank email today — nothing to process.",
+            dry_run=DRY_RUN,
+        )
         return
 
     # Parse all matching ZIPs and accumulate filtered rows
@@ -523,6 +528,21 @@ def main():
 
     logger.info("Dedupe: %d new | %d already in sheet | %d blank ACCOUNT_NUMBER",
                 len(new_rows), dupes, blank)
+
+    # Heartbeat case 2: mails parsed but every R-row is already in the sheet.
+    # Equivalent to sync_cancellations' "all msg-ids in processed_emails.json"
+    # — the most recent Wesbank email predates today and we've seen it before.
+    # Skip the summary email (which would otherwise read as `✅ clean`,
+    # indistinguishable from a real today's-email-with-zero-rejections run).
+    if not new_rows and dupes > 0:
+        logger.info("All %d row(s) already in sheet — sending heartbeat and exiting cleanly",
+                    dupes)
+        send_heartbeat_email(
+            run_date=run_date,
+            reason="No new Wesbank emails — most recent already processed.",
+            dry_run=DRY_RUN,
+        )
+        return
 
     if DRY_RUN:
         logger.info("DRY RUN — would append the following %d row(s):", len(new_rows))
