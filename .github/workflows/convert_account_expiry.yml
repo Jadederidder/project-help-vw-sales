@@ -2,9 +2,10 @@ name: Daily VW ACCOUNT EXPIRY → Revio Conversion
 
 on:
   schedule:
-    # 04:08 SAST = 02:08 UTC. 3 min after sync_rejections (02:05 UTC) which
-    # populates the REJECTIONS tab; 2 min before cancel_casi_revio (02:10 UTC).
-    - cron: "8 2 * * *"
+    # 04:08 SAST = 02:08 UTC, Mon-Sat (Wesbank doesn't send on Sundays).
+    # 3 min after sync_rejections (02:05 UTC) which populates the
+    # REJECTIONS tab; 2 min before cancel_casi_revio (02:10 UTC).
+    - cron: "8 2 * * 1-6"
 
   workflow_dispatch:
     inputs:
