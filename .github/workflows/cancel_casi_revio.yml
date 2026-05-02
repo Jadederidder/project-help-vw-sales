@@ -2,10 +2,11 @@ name: VW Casi Cancellations
 
 on:
   schedule:
-    # 04:10 SAST = 02:10 UTC. 10 min after sync_cancellations (02:00 UTC)
-    # so any newly-appended CANCELLATIONS rows are picked up here. Email
-    # lands well before JD's 04:30 SAST start.
-    - cron: "10 2 * * *"
+    # 04:10 SAST = 02:10 UTC, Mon-Sat (Wesbank doesn't send on Sundays).
+    # 10 min after sync_cancellations (02:00 UTC) so any newly-appended
+    # CANCELLATIONS rows are picked up here. Email lands well before JD's
+    # 04:30 SAST start.
+    - cron: "10 2 * * 1-6"
 
   workflow_dispatch:
     inputs:

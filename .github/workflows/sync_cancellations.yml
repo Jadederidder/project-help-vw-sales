@@ -2,10 +2,11 @@ name: Daily VW/Audi Cancellations Sync
 
 on:
   schedule:
-    # 04:00 SAST = 02:00 UTC. Early enough that the summary email lands
-    # in JD's inbox before her 04:30 SAST start. Followed at +5 min by
-    # sync_rejections, +10 min by cancel_casi_revio.
-    - cron: "0 2 * * *"
+    # 04:00 SAST = 02:00 UTC, Mon-Sat (Wesbank doesn't send on Sundays).
+    # Early enough that the summary email lands in JD's inbox before her
+    # 04:30 SAST start. Followed at +5 min by sync_rejections, +10 min by
+    # cancel_casi_revio.
+    - cron: "0 2 * * 1-6"
 
   workflow_dispatch:
     inputs:

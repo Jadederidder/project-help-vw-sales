@@ -362,6 +362,50 @@ def build_summary_excel(new_rows):
     return bio.read()
 
 
+def send_heartbeat_email(run_date, dry_run=False):
+    """Sent when IMAP returned no matching emails in the lookback window —
+    distinguishable subject (`[HEARTBEAT]`) so JD can filter."""
+    sender  = os.environ.get("EMAIL_SENDER")
+    pwd     = os.environ.get("EMAIL_PASSWORD")
+    recip_s = os.environ.get("EMAIL_RECIPIENT", "")
+    if not sender or not pwd:
+        logger.warning("EMAIL_SENDER / EMAIL_PASSWORD not set — skipping heartbeat email")
+        return
+    if dry_run:
+        recipients = [DRY_RUN_RECIPIENT]
+    else:
+        recipients = [r.strip() for r in recip_s.split(",") if r.strip()]
+    if not recipients:
+        logger.warning("No recipients — skipping heartbeat email")
+        return
+
+    date_label = run_date.strftime("%d %b %Y")
+    subject = f"[HEARTBEAT] VW Cancellations — no email today ({date_label})"
+    if dry_run:
+        subject = f"[DRY RUN] {subject}"
+    body = (
+        f"VW/Audi Cancellations daily sync — {date_label}\n"
+        "\n"
+        "  No Wesbank email today — nothing to process.\n"
+        f"  Lookback window: {SEARCH_DAYS} days.\n"
+        "\n"
+        "  Workflow exited cleanly (no sheet writes, no state update).\n"
+    )
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"]    = sender
+    msg["To"]      = ", ".join(recipients)
+    msg.set_content(body)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(sender, pwd)
+        smtp.send_message(msg)
+    logger.info("Heartbeat email sent → %s%s",
+                ", ".join(recipients),
+                " (DRY RUN)" if dry_run else "")
+
+
 def send_summary_email(run_date, new_rows, emails_processed, dupes_skipped, dry_run=False):
     sender  = os.environ.get("EMAIL_SENDER")
     pwd     = os.environ.get("EMAIL_PASSWORD")
@@ -464,6 +508,13 @@ def main():
     logger.info("State: %d previously-processed email(s)", len(processed_ids))
 
     mails = fetch_cancellation_emails(username, password)
+
+    if not mails and not DIAGNOSTIC:
+        logger.info("No matching emails in last %d days — sending heartbeat and exiting cleanly",
+                    SEARCH_DAYS)
+        send_heartbeat_email(run_date=run_date, dry_run=DRY_RUN)
+        return
+
     unseen = [m for m in mails if m["msg_id"] and m["msg_id"] not in processed_ids]
     logger.info("Unprocessed matching emails: %d (of %d found)", len(unseen), len(mails))
 
