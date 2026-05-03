@@ -43,11 +43,16 @@ import os
 import re
 import smtplib
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
+from pathlib import Path
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from email_template import RunSummary, build_run_summary_email  # noqa: E402
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.revio_subscription import (
@@ -657,7 +662,101 @@ def existing_pending_accounts(svc):
 
 
 # ─── Email ───────────────────────────────────────────────────────────────────
-def send_summary_email(stats, run_date_str, dry_run, error_summary=""):
+def _build_account_expiry_summary(stats, run_date, run_date_str, dry_run,
+                                  error_summary, duration_seconds):
+    n_conv = stats["converted"]
+    n_new_pending = stats["new_pending"]
+    n_still_pending = stats["still_pending"]
+    n_moved = stats["moved"]
+    n_err = stats["errors"]
+    total_pending = n_new_pending + n_still_pending
+
+    if error_summary:
+        outcome = "failure"
+        headline = f"Errors during conversion ({n_conv} partial)"
+    elif n_err > 0:
+        outcome = "failure"
+        headline = f"{n_err} error(s); {n_conv} converted"
+    elif n_conv == 0 and n_new_pending == 0 and n_still_pending == 0 and n_moved == 0:
+        outcome = "noop"
+        headline = "No ACCOUNT EXPIRY rows to action"
+    else:
+        outcome = "success"
+        parts = []
+        if n_conv:
+            parts.append(f"{n_conv} converted")
+        if total_pending:
+            parts.append(f"{total_pending} still pending")
+        if n_moved:
+            parts.append(f"{n_moved} aged out")
+        headline = ", ".join(parts) or "Clean run"
+
+    if outcome == "noop":
+        summary = (
+            f"Read REJECTIONS for ACCOUNT EXPIRY rows on {run_date_str}. "
+            f"Nothing new to convert and no pending rows to retry."
+        )
+    elif outcome == "failure":
+        summary = (
+            f"Conversion run completed with errors on {run_date_str}. "
+            f"{n_conv} converted, {n_err} error(s)"
+            + (f": {error_summary}" if error_summary else ".")
+            + " Retry will happen automatically tomorrow."
+        )
+    else:
+        bits = []
+        if n_conv:
+            bits.append(f"{n_conv} had matching SALES rows and were converted to Revio direct debit")
+        if n_new_pending:
+            bits.append(f"{n_new_pending} still have no SALES match — added to PENDING_CONVERSIONS, will retry tomorrow")
+        if n_still_pending:
+            bits.append(f"{n_still_pending} carried over from earlier runs, still unmatched")
+        if n_moved:
+            bits.append(
+                f"{n_moved} aged out (>={PENDING_TIMEOUT_WEEKS} weeks unmatched) "
+                f"and moved back to REJECTIONS"
+            )
+        summary = (
+            f"Read REJECTIONS for ACCOUNT EXPIRY rows on {run_date_str}. "
+            + ". ".join(bits)
+            + "."
+        )
+
+    numbers = {
+        "Converted to Revio": n_conv,
+        "PENDING (no SALES match)": n_new_pending,
+        "Still pending from earlier runs": n_still_pending,
+        f"Aged out to REJECTIONS (>={PENDING_TIMEOUT_WEEKS} wk)": n_moved,
+        "ERROR (retry tomorrow)": n_err,
+    }
+
+    next_steps = []
+    if stats.get("error_rows"):
+        for r in stats["error_rows"]:
+            next_steps.append(
+                f"Investigate acct {r['account']} ({r['personal_code']}): {r['error']}"
+            )
+    if error_summary and not next_steps:
+        next_steps.append(f"Investigate critical error: {error_summary}")
+
+    sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
+
+    return RunSummary(
+        workflow_name="VW Account-Expiry Conversion",
+        run_date=run_date,
+        mode="dry_run" if dry_run else "production",
+        outcome=outcome,
+        headline=headline,
+        summary_paragraph=summary,
+        numbers=numbers,
+        duration_seconds=duration_seconds,
+        next_steps=next_steps,
+        sheet_url=sheet_url,
+    )
+
+
+def send_summary_email(stats, run_date_str, dry_run, error_summary="",
+                       run_date=None, duration_seconds=0.0):
     sender = os.environ.get("EMAIL_SENDER")
     pwd    = os.environ.get("EMAIL_PASSWORD")
     if not sender or not pwd:
@@ -673,81 +772,22 @@ def send_summary_email(stats, run_date_str, dry_run, error_summary=""):
         logger.warning("No recipients — skipping summary email")
         return
 
-    n_conv  = stats["converted"]
-    n_new_pending  = stats["new_pending"]
-    n_still_pending = stats["still_pending"]
-    n_moved = stats["moved"]
-    n_err   = stats["errors"]
-
-    if error_summary or n_err > 0:
-        subject = f"⚠ VW ACCOUNT EXPIRY — error(s); {n_conv} partial"
-    elif n_moved:
-        subject = (f"⚠ VW ACCOUNT EXPIRY — {n_conv} converted, "
-                   f"{n_moved} moved to REJECTIONS")
-    elif n_conv or n_new_pending:
-        subject = (f"📥 VW ACCOUNT EXPIRY — {n_conv} converted, "
-                   f"{n_new_pending + n_still_pending} pending")
-    else:
-        subject = f"✅ VW ACCOUNT EXPIRY conversions — clean ({run_date_str})"
-    if dry_run:
-        subject = f"[DRY RUN] {subject}"
-
-    lines = [
-        f"VW ACCOUNT EXPIRY conversions — {run_date_str}",
-        "",
-        f"  ✓ {n_conv} converted to Revio debit order",
-        f"  ⏳ {n_new_pending} added to PENDING (no SALES match yet)",
-        f"  ⏳ {n_still_pending} still pending from previous days",
-        f"  ⚠ {n_moved} moved to REJECTIONS (>={PENDING_TIMEOUT_WEEKS} weeks unmatched)",
-        f"  ⚠ {n_err} errors",
-        "",
-    ]
-    if stats["converted_rows"]:
-        lines.append("Successful conversions:")
-        for r in stats["converted_rows"]:
-            lines.append(
-                f"  - {r['name']} | acc {r['account']} | {r['product']} | "
-                f"R{r['price']}/m | next debit {r['next_debit']} | "
-                f"Revio sub {r['revio_client_id']}"
-            )
-        lines.append("")
-    if stats["new_pending_rows"]:
-        lines.append("Pending (no SALES match yet):")
-        for r in stats["new_pending_rows"]:
-            lines.append(
-                f"  - {r['account']} | first seen {r['first_seen']} | "
-                f"weeks pending {r['weeks']}"
-            )
-        lines.append("")
-    if stats["moved_rows"]:
-        lines.append("Moved to REJECTIONS this run:")
-        for r in stats["moved_rows"]:
-            lines.append(
-                f"  - {r['account']} | weeks pending {r['weeks']} | "
-                f"reason: never appeared in SALES"
-            )
-        lines.append("")
-    if stats.get("error_rows"):
-        lines.append(
-            f"⚠ {len(stats['error_rows'])} row(s) in ERROR state "
-            f"(will auto-retry tomorrow):"
-        )
-        for r in stats["error_rows"]:
-            lines.append(
-                f"  - {r['personal_code']} (acc {r['account']}) — "
-                f"{r['error']}"
-            )
-        lines.append("")
-    if error_summary:
-        lines += ["", f"ERROR: {error_summary}"]
-    if dry_run:
-        lines += ["", "DRY RUN — no Revio calls and no sheet writes were made."]
+    summary = _build_account_expiry_summary(
+        stats=stats,
+        run_date=run_date or datetime.now(timezone.utc),
+        run_date_str=run_date_str,
+        dry_run=dry_run,
+        error_summary=error_summary,
+        duration_seconds=duration_seconds,
+    )
+    subject, html_body = build_run_summary_email(summary)
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"]    = sender
     msg["To"]      = ", ".join(recipients)
-    msg.set_content("\n".join(lines) + "\n")
+    msg.set_content("HTML email — see HTML part for the run summary.")
+    msg.add_alternative(html_body, subtype="html")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(sender, pwd)
@@ -770,6 +810,7 @@ def parse_args():
 def main():
     args = parse_args()
     run_dt = datetime.now(timezone.utc)
+    started = time.monotonic()
 
     logger.info("=" * 60)
     logger.info("VW ACCOUNT EXPIRY → REVIO CONVERSION")
@@ -989,6 +1030,8 @@ def main():
         run_date_str=today.strftime("%d %b %Y"),
         dry_run=DRY_RUN,
         error_summary=error_summary,
+        run_date=run_dt,
+        duration_seconds=time.monotonic() - started,
     )
 
     logger.info("=" * 60)

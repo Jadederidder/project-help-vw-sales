@@ -3,11 +3,17 @@ import os
 import json
 import logging
 import smtplib
+import sys
+import time
 from email.message import EmailMessage
-from datetime import date
+from datetime import date, datetime, timezone
+from pathlib import Path
 from dateutil.relativedelta import relativedelta
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from email_template import RunSummary, build_run_summary_email  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-10s %(message)s")
 logger = logging.getLogger(__name__)
@@ -116,31 +122,63 @@ def create_invoice_tab(service, tab_name, dash_row):
     logger.info(f"Formula written to '{tab_name}'!A2")
     return new_gid
 
-def send_notification(month_str, row, tab_name, tab_created, formulas_written):
+def send_notification(month_str, row, tab_name, tab_created, formulas_written,
+                      duration_seconds=0.0):
     sender   = os.environ.get("EMAIL_SENDER")
     password = os.environ.get("EMAIL_PASSWORD")
     recipient = os.environ.get("EMAIL_RECIPIENT", "jd@projecthelp.co.za")
     if not sender or not password:
         logger.warning("EMAIL_SENDER or EMAIL_PASSWORD not set — skipping notification")
         return
-    formula_line  = f"  - 17 formulas written to DASHBOARD row {row}" if formulas_written else f"  - DASHBOARD row {row} already had data — formulas skipped"
-    tab_line      = f"  - Created new tab '{tab_name}'" if tab_created else f"  - Tab '{tab_name}' already existed — skipped"
-    body = (
-        f"Hi,\n\n"
-        f"The VW Monthly Invoice Sync ran successfully.\n\n"
-        f"Summary:\n"
-        f"  - Month processed : {month_str}\n"
-        f"{formula_line}\n"
-        f"{tab_line}\n"
-        f"  - Drilldown link updated in DASHBOARD col X row {row}\n\n"
-        f"Run date: {date.today()}\n\n"
-        f"— VW Sales Automation"
+
+    actions = []
+    if formulas_written:
+        actions.append(f"17 formulas written to DASHBOARD row {row}")
+    else:
+        actions.append(f"DASHBOARD row {row} already had data — formulas skipped")
+    if tab_created:
+        actions.append(f"created new tab '{tab_name}'")
+    else:
+        actions.append(f"tab '{tab_name}' already existed — skipped")
+    actions.append(f"drilldown link updated in DASHBOARD col X row {row}")
+
+    if formulas_written and tab_created:
+        headline = f"DASHBOARD row written for {month_str} + drilldown tab created"
+    elif formulas_written:
+        headline = f"DASHBOARD row written for {month_str}"
+    elif tab_created:
+        headline = f"Drilldown tab created for {month_str}"
+    else:
+        headline = f"{month_str} already in place — drilldown refreshed"
+
+    summary = "VW Monthly Invoice Sync completed: " + "; ".join(actions) + "."
+
+    numbers = {
+        "Month processed": month_str,
+        "DASHBOARD row": row,
+        "Formulas written": "yes" if formulas_written else "no (row already had data)",
+        "Tab created": tab_name if tab_created else f"{tab_name} (already existed)",
+    }
+
+    rs = RunSummary(
+        workflow_name="VW Monthly Invoice Sync",
+        run_date=datetime.now(timezone.utc),
+        mode="production",
+        outcome="success",
+        headline=headline,
+        summary_paragraph=summary,
+        numbers=numbers,
+        duration_seconds=duration_seconds,
+        sheet_url=f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit",
     )
+    subject, html_body = build_run_summary_email(rs)
+
     msg = EmailMessage()
-    msg["Subject"] = f"VW Invoice Sync — {month_str} completed"
+    msg["Subject"] = subject
     msg["From"]    = sender
     msg["To"]      = recipient
-    msg.set_content(body)
+    msg.set_content("HTML email — see HTML part for the run summary.")
+    msg.add_alternative(html_body, subtype="html")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(sender, password)
         smtp.send_message(msg)
@@ -153,6 +191,7 @@ def write_drilldown(service, dash_gid, row, new_gid, tab_label):
 
 def main():
     dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
+    started = time.monotonic()
     logger.info("=" * 60)
     logger.info("VW MONTHLY INVOICE SYNC")
     logger.info(f"Run date : {date.today()}")
@@ -205,7 +244,8 @@ def main():
     logger.info("=" * 60)
     logger.info("DONE")
     logger.info("=" * 60)
-    send_notification(month_str, row, tab_name, tab_created, formulas_written)
+    send_notification(month_str, row, tab_name, tab_created, formulas_written,
+                      duration_seconds=time.monotonic() - started)
 
 if __name__ == "__main__":
     main()

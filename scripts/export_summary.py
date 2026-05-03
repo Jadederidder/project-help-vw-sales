@@ -33,12 +33,16 @@ import logging
 import os
 import smtplib
 import sys
+import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 
 import gspread
 from google.oauth2.service_account import Credentials
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from email_template import RunSummary, build_run_summary_email  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -318,16 +322,33 @@ def _changed_rows(prev, payload):
     return rows
 
 
-def _email_run_summary(prev, payload):
+def _send_email(summary: RunSummary):
     sender    = os.environ.get("EMAIL_SENDER", "")
     password  = os.environ.get("EMAIL_PASSWORD", "")
     recipient = os.environ.get("EMAIL_RECIPIENT", "jd@projecthelp.co.za")
     if not sender or not password:
         logger.warning(
-            "EMAIL_SENDER / EMAIL_PASSWORD not set — skipping run summary email"
+            "EMAIL_SENDER / EMAIL_PASSWORD not set — skipping email"
         )
         return
 
+    subject, html_body = build_run_summary_email(summary)
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"]    = sender
+    msg["To"]      = recipient
+    msg.set_content("HTML email — see HTML part for the run summary.")
+    msg.add_alternative(html_body, subtype="html")
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(sender, password)
+            smtp.send_message(msg)
+        logger.info("Summary email sent → %s", recipient)
+    except Exception as e:
+        logger.error("Failed to send summary email: %s", e)
+
+
+def _email_run_summary(prev, payload, dry_run, duration_seconds):
     new_latest = payload["months"][-1]
     new_cum    = new_latest.get("cumNet")
     new_rev    = new_latest.get("totalRevCum")
@@ -339,89 +360,101 @@ def _email_run_summary(prev, payload):
         prev_cum = prev_rev = None
 
     rows = _changed_rows(prev, payload)
+    months_changed = len(rows)
+    current_month = new_latest.get("month", "(unknown)")
 
-    # Subject line
-    if prev_cum is None or new_cum is None:
-        cum_part = f"cumNet {new_cum if new_cum is not None else 'n/a'}"
-    elif new_cum == prev_cum:
-        cum_part = f"cumNet {new_cum} (unchanged)"
-    else:
-        cum_part = f"cumNet {prev_cum}→{new_cum} ({new_cum - prev_cum:+d})"
-    subject = f"VW Dashboard sync — {cum_part}, {len(rows)} month rows changed"
-
-    # Body
-    lines = [
-        "Hi JD,",
-        "",
-        f"Run timestamp: {payload['lastUpdated']}",
-        "",
-        f"cumNet:      {_fmt_change(prev_cum, new_cum)}",
-        f"totalRevCum: {_fmt_change(prev_rev, new_rev)}",
-        "",
-        f"Months changed: {len(rows)}",
-    ]
-    for month, diffs in rows:
-        lines.append("")
-        lines.append(f"  {month}:")
-        for f, p, n in diffs:
-            lines.append(f"    {f}: {_fmt_change(p, n)}")
-    lines += ["", "— VW Sales Automation"]
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"]    = sender
-    msg["To"]      = recipient
-    msg.set_content("\n".join(lines))
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(sender, password)
-            smtp.send_message(msg)
-        logger.info("Run summary email sent → %s", recipient)
-    except Exception as e:
-        logger.error("Failed to send run summary email: %s", e)
-
-
-def _email_gross_regression(violations):
-    sender    = os.environ.get("EMAIL_SENDER", "")
-    password  = os.environ.get("EMAIL_PASSWORD", "")
-    recipient = os.environ.get("EMAIL_RECIPIENT", "jd@projecthelp.co.za")
-    if not sender or not password:
-        logger.warning(
-            "EMAIL_SENDER / EMAIL_PASSWORD not set — skipping regression alert"
+    if months_changed == 0 and (prev_cum is None or new_cum == prev_cum):
+        outcome = "noop"
+        headline = "No dashboard changes — already current"
+        summary_text = (
+            f"summary.json was {'(would be) ' if dry_run else ''}rebuilt from "
+            f"the DASHBOARD tab. cumNet {new_cum} and {months_changed} month "
+            "rows changed since the last write — nothing new to publish."
         )
-        return
+    else:
+        outcome = "success"
+        verb = "would be updated" if dry_run else "updated"
+        headline = f"summary.json {verb} for {current_month}"
+        change_bits = []
+        if prev_cum is not None and new_cum is not None and new_cum != prev_cum:
+            change_bits.append(f"cumNet {prev_cum}→{new_cum} ({new_cum - prev_cum:+d})")
+        if months_changed:
+            change_bits.append(f"{months_changed} month row(s) changed")
+        summary_text = (
+            f"DASHBOARD tab read; "
+            + ("; ".join(change_bits) if change_bits else f"latest month {current_month}")
+            + ". "
+            + ("Dashboard JSON was not written (dry-run)." if dry_run
+               else "Dashboard JSON written.")
+        )
 
-    lines = "\n".join(
-        f"  - {m}: previous gross = {pg}, new gross = {ng if ng is not None else 'missing'}"
+    numbers = {
+        "Months in summary": len(payload["months"]),
+        "Latest month": current_month,
+        "cumNet (new)": new_cum if new_cum is not None else "n/a",
+        "cumNet (previous)": prev_cum if prev_cum is not None else "n/a",
+        "cumNet delta": (
+            f"{new_cum - prev_cum:+d}"
+            if (isinstance(prev_cum, (int, float)) and isinstance(new_cum, (int, float)))
+            else "n/a"
+        ),
+        "totalRevCum (new)": new_rev if new_rev is not None else "n/a",
+        "Past months changed": months_changed,
+    }
+
+    next_steps = []
+    if rows:
+        for month, diffs in rows[:5]:
+            diff_str = ", ".join(f"{f}: {_fmt_change(p, n)}" for f, p, n in diffs)
+            next_steps.append(f"{month}: {diff_str}")
+        if len(rows) > 5:
+            next_steps.append(f"… and {len(rows) - 5} more month(s) changed")
+
+    rs = RunSummary(
+        workflow_name="VW Dashboard Summary",
+        run_date=datetime.now(timezone.utc),
+        mode="dry_run" if dry_run else "production",
+        outcome=outcome,
+        headline=headline,
+        summary_paragraph=summary_text,
+        numbers=numbers,
+        duration_seconds=duration_seconds,
+        next_steps=next_steps,
+    )
+    _send_email(rs)
+
+
+def _email_gross_regression(violations, dry_run, duration_seconds):
+    detail_lines = [
+        f"{m}: previous gross = {pg}, new gross = {ng if ng is not None else 'missing'}"
         for m, pg, ng in violations
-    )
-    body = (
-        "Hi JD,\n\n"
-        "export_summary.py refused to write docs/data/summary.json because "
+    ]
+    summary_text = (
+        f"export_summary.py refused to write summary.json because "
         f"{len(violations)} past month(s) had positive gross drop to 0 or "
-        "vanish from the DASHBOARD tab:\n\n"
-        f"{lines}\n\n"
-        "The dashboard has been left on its previous values. Likely cause: "
-        "a formula or source row in DASHBOARD/MASTER_BOOK was edited or "
-        "deleted. Inspect the affected cells and re-run the sync once "
-        "they're repaired.\n\n"
-        "— VW Sales Automation"
+        "vanish from the DASHBOARD tab. Likely cause: a formula or source "
+        "row in DASHBOARD/MASTER_BOOK was edited or deleted. The dashboard "
+        "has been left on its previous values."
     )
-    msg = EmailMessage()
-    msg["Subject"] = (
-        f"VW Dashboard — gross regression on "
-        f"{len(violations)} month(s), sync aborted"
+    numbers = {
+        "Months violating guard": len(violations),
+        "Action": "Write skipped (sync aborted)",
+    }
+    rs = RunSummary(
+        workflow_name="VW Dashboard Summary",
+        run_date=datetime.now(timezone.utc),
+        mode="dry_run" if dry_run else "production",
+        outcome="failure",
+        headline="REGRESSION DETECTED — write skipped",
+        summary_paragraph=summary_text,
+        numbers=numbers,
+        duration_seconds=duration_seconds,
+        next_steps=[
+            "Inspect the affected DASHBOARD cells and re-run once repaired",
+            "If the drop is intentional, set FORCE_OVERWRITE=true and re-run",
+        ] + detail_lines,
     )
-    msg["From"]    = sender
-    msg["To"]      = recipient
-    msg.set_content(body)
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(sender, password)
-            smtp.send_message(msg)
-        logger.info("Regression alert sent → %s", recipient)
-    except Exception as e:
-        logger.error("Failed to send regression alert: %s", e)
+    _send_email(rs)
 
 
 def main():
@@ -430,6 +463,7 @@ def main():
         format="%(asctime)s  %(levelname)-8s  %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+    started = time.monotonic()
     payload = build_payload()
     prev    = _load_existing()
 
@@ -449,8 +483,8 @@ def main():
                 "0/missing — aborting to avoid poisoning the dashboard: %s",
                 len(violations), detail,
             )
-            if not DRY_RUN:
-                _email_gross_regression(violations)
+            _email_gross_regression(violations, dry_run=DRY_RUN,
+                                    duration_seconds=time.monotonic() - started)
             sys.exit(2)
 
     json_str = json.dumps(payload, indent=2, ensure_ascii=False)
@@ -464,13 +498,13 @@ def main():
     if DRY_RUN:
         logger.info("DRY_RUN=true — not writing. Payload below:")
         print(json_str)
-        return
+    else:
+        OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        OUT_PATH.write_text(json_str + "\n", encoding="utf-8")
+        logger.info("Wrote %s", OUT_PATH)
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json_str + "\n", encoding="utf-8")
-    logger.info("Wrote %s", OUT_PATH)
-
-    _email_run_summary(prev, payload)
+    _email_run_summary(prev, payload, dry_run=DRY_RUN,
+                       duration_seconds=time.monotonic() - started)
 
 
 if __name__ == "__main__":
