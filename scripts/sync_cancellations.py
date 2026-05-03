@@ -36,11 +36,15 @@ import logging
 import os
 import smtplib
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from email_template import RunSummary, build_run_summary_email  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -365,7 +369,10 @@ def build_summary_excel(new_rows):
 def send_heartbeat_email(run_date, reason, dry_run=False):
     """Sent when there's nothing meaningful to process — distinguishable
     subject (`[HEARTBEAT]`) so JD can filter. `reason` is a one-line body
-    explaining which heartbeat case fired."""
+    explaining which heartbeat case fired.
+
+    Deliberately plain-text and outside the RunSummary template — the
+    [HEARTBEAT] prefix is a stable filter signal in JD's mailbox."""
     sender  = os.environ.get("EMAIL_SENDER")
     pwd     = os.environ.get("EMAIL_PASSWORD")
     recip_s = os.environ.get("EMAIL_RECIPIENT", "")
@@ -407,7 +414,72 @@ def send_heartbeat_email(run_date, reason, dry_run=False):
                 " (DRY RUN)" if dry_run else "")
 
 
-def send_summary_email(run_date, new_rows, emails_processed, dupes_skipped, dry_run=False):
+def _build_cancellations_summary(
+    run_date, new_rows, emails_processed, dupes_skipped, source_email_date, dry_run, duration_seconds,
+):
+    n = len(new_rows)
+
+    if n == 0:
+        outcome = "success"
+        headline = "0 new cancellations — all already in sheet"
+        summary = (
+            f"Pulled today's email{' from Wesbank dated ' + source_email_date if source_email_date else ''}. "
+            f"All rows already present in CANCELLATIONS — nothing appended. "
+            f"Casi cancellations will run at 04:10."
+        )
+    else:
+        outcome = "success"
+        plural = "s" if n != 1 else ""
+        headline = f"{n} new cancellation{plural} queued for Casi"
+        summary = (
+            f"Pulled today's email{' from Wesbank dated ' + source_email_date if source_email_date else ''}. "
+            f"{n} new cancellation{plural} parsed and appended, "
+            f"{dupes_skipped} already in the sheet. "
+            f"Casi cancellations will run at 04:10."
+        )
+
+    numbers = {
+        "Source email date": source_email_date or "(no email today)",
+        "Emails processed": emails_processed,
+        "Already in tab": dupes_skipped,
+        ("Would-be appended" if dry_run else "Appended"): n,
+        "Errors": 0,
+    }
+
+    if n:
+        by_brand = {}
+        by_type = {}
+        for r in new_rows:
+            b = _derive_brand(r.get("DEA_NAME"))
+            m = _derive_membership(r.get("VAP_PREMIUM_AMT"))
+            by_brand[b] = by_brand.get(b, 0) + 1
+            by_type[m] = by_type.get(m, 0) + 1
+        numbers["By brand"] = ", ".join(f"{k}: {v}" for k, v in by_brand.items())
+        numbers["By membership"] = ", ".join(f"{k or '(blank)'}: {v}" for k, v in by_type.items())
+
+    sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
+    attachments_note = (
+        f"Excel of {n} new row{'s' if n != 1 else ''} attached" if n else None
+    )
+
+    return RunSummary(
+        workflow_name="VW Cancellations Sync",
+        run_date=run_date,
+        mode="dry_run" if dry_run else "production",
+        outcome=outcome,
+        headline=headline,
+        summary_paragraph=summary,
+        numbers=numbers,
+        duration_seconds=duration_seconds,
+        sheet_url=sheet_url,
+        attachments_note=attachments_note,
+    )
+
+
+def send_summary_email(
+    run_date, new_rows, emails_processed, dupes_skipped,
+    source_email_date=None, dry_run=False, duration_seconds=0.0,
+):
     sender  = os.environ.get("EMAIL_SENDER")
     pwd     = os.environ.get("EMAIL_PASSWORD")
     recip_s = os.environ.get("EMAIL_RECIPIENT", "")
@@ -422,49 +494,23 @@ def send_summary_email(run_date, new_rows, emails_processed, dupes_skipped, dry_
         logger.warning("No recipients — skipping summary email")
         return
 
-    n = len(new_rows)
-    date_label = run_date.strftime("%d %b %Y")
-    plural = "s" if n != 1 else ""
-    if n == 0:
-        subject = f"✅ VW Cancellations — clean ({date_label})"
-    else:
-        subject = f"📥 VW Cancellations — {n} new row{plural} ({date_label})"
-    if dry_run:
-        subject = f"[DRY RUN] {subject}"
-
-    body_lines = [
-        f"VW/Audi Cancellations daily sync — {date_label}",
-        "",
-    ]
-    if n == 0:
-        body_lines += ["  ✅ Run completed clean — nothing to action today.", ""]
-    body_lines += [
-        f"  Emails processed   : {emails_processed}",
-        f"  New rows appended  : {n}",
-        f"  Already-in-sheet   : {dupes_skipped}",
-    ]
-    if n:
-        by_brand = {}
-        by_type  = {}
-        for r in new_rows:
-            b = _derive_brand(r.get("DEA_NAME"))
-            m = _derive_membership(r.get("VAP_PREMIUM_AMT"))
-            by_brand[b] = by_brand.get(b, 0) + 1
-            by_type[m]  = by_type.get(m, 0) + 1
-        body_lines += [
-            "",
-            f"  By brand      : {by_brand}",
-            f"  By membership : {by_type}",
-        ]
-    if dry_run:
-        body_lines += ["", "DRY RUN — no rows were written and state was not committed."]
-    body = "\n".join(body_lines) + "\n"
+    summary = _build_cancellations_summary(
+        run_date=run_date,
+        new_rows=new_rows,
+        emails_processed=emails_processed,
+        dupes_skipped=dupes_skipped,
+        source_email_date=source_email_date,
+        dry_run=dry_run,
+        duration_seconds=duration_seconds,
+    )
+    subject, html_body = build_run_summary_email(summary)
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"]    = sender
     msg["To"]      = ", ".join(recipients)
-    msg.set_content(body)
+    msg.set_content("HTML email — see HTML part for the run summary.")
+    msg.add_alternative(html_body, subtype="html")
 
     xlsx = build_summary_excel(new_rows)
     if xlsx:
@@ -492,6 +538,7 @@ def main():
     )
 
     run_date = datetime.now(timezone.utc)
+    started = time.monotonic()
     logger.info("=" * 60)
     logger.info("VW/AUDI CANCELLATIONS SYNC")
     logger.info("Run date   : %s", run_date.isoformat(timespec="seconds"))
@@ -586,13 +633,22 @@ def main():
         append_rows(service, aligned)
         logger.info("Appended %d rows to %s", len(aligned), TAB_NAME)
 
-    # Heartbeat email even when 0 new — silence = "did it run?"
+    source_email_date = ""
+    if unseen:
+        latest = max(unseen, key=lambda m: m["date"])
+        source_email_date = latest["date"].strftime("%d %b %Y")
+
+    # Run-summary email — fires whenever we parsed at least one unseen email
+    # (the "no email today" / "all already processed" cases short-circuit
+    # earlier via send_heartbeat_email).
     send_summary_email(
         run_date=run_date,
         new_rows=new_rows,
         emails_processed=len(unseen),
         dupes_skipped=dupes,
+        source_email_date=source_email_date,
         dry_run=DRY_RUN,
+        duration_seconds=time.monotonic() - started,
     )
 
     # State: only touch on successful non-dry non-diagnostic runs

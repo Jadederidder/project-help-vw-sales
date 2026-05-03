@@ -30,10 +30,14 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from pathlib import Path
 
 import requests
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from email_template import RunSummary, build_run_summary_email  # noqa: E402
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 SHEET_ID = "1nzDkzva7wZO0lDFBDctNQdqxvOU-uexyUkxmex6xGgs"
@@ -328,7 +332,95 @@ def casi_cancel_by_phone(phone, cover_id):
 
 
 # ─── Email ───────────────────────────────────────────────────────────────────
-def send_summary_email(stats, rows_detail, dry_run):
+def _build_casi_summary(stats, rows_detail, dry_run, duration_seconds):
+    skipped_unknown = (stats["skipped"] - stats["no_phone"]
+                       - stats["phone_invalid"])
+    action_count = stats["cancelled"] + skipped_unknown
+    errors = stats["errors"]
+    cancelled = stats["cancelled"]
+    not_in_app = stats["no_phone"] + stats["phone_invalid"]
+
+    if errors > 0:
+        outcome = "failure"
+        headline = (f"{errors} error(s); {cancelled} cancelled, "
+                    f"{skipped_unknown} to classify")
+    elif stats["examined"] == 0:
+        outcome = "noop"
+        headline = "No cancellation rows to process"
+    elif action_count == 0:
+        outcome = "noop"
+        headline = "All rows already processed"
+    else:
+        outcome = "success"
+        headline = (f"{cancelled} cancelled in Casi"
+                    + (f", {not_in_app} not in app" if not_in_app else ""))
+
+    if outcome == "noop" and stats["examined"] == 0:
+        summary = "No CANCELLATIONS rows had an empty Processed Date — nothing to action."
+    elif outcome == "noop":
+        summary = (
+            f"All {stats['already_processed']} CANCELLATIONS rows already had a "
+            f"Processed Date — nothing new to action."
+        )
+    elif outcome == "failure":
+        summary = (
+            f"Read CANCELLATIONS rows where Processed Date was empty "
+            f"({stats['examined']} examined). {errors} hit errors; "
+            f"{cancelled} cancellation(s) still actioned. "
+            "Manual investigation needed for error rows."
+        )
+    else:
+        summary = (
+            f"Read CANCELLATIONS rows where Processed Date was empty "
+            f"({stats['examined']} examined). {cancelled} successfully "
+            f"removed from Casi covers"
+            + (
+                f". {not_in_app} phone(s) not in any Casi cover — "
+                f"likely never downloaded the app"
+                if not_in_app else ""
+            )
+            + (f". {skipped_unknown} row(s) need manual classification"
+               if skipped_unknown else "")
+            + "."
+        )
+
+    numbers = {
+        "Rows examined": stats["examined"],
+        "Already processed (skipped)": stats["already_processed"],
+        "Cancelled in Casi": cancelled,
+        "Not in Casi (no phone / invalid)": not_in_app,
+        "Unknown reason (manual classify)": skipped_unknown,
+        "Phone via account#": stats["phone_via_account_number"],
+        "Phone via id#": stats["phone_via_id_number"],
+        "Errors": errors,
+    }
+
+    next_steps = []
+    if errors:
+        for r in rows_detail:
+            if "error" in (r.get("status") or "").lower():
+                next_steps.append(
+                    f"Investigate acct {r['account']} ({r.get('reason') or 'no reason'}): "
+                    f"{r.get('notes') or r.get('status')}"
+                )
+
+    sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
+
+    return RunSummary(
+        workflow_name="VW Casi Cancellations",
+        run_date=datetime.now(SAST),
+        mode="dry_run" if dry_run else "production",
+        outcome=outcome,
+        headline=headline,
+        summary_paragraph=summary,
+        numbers=numbers,
+        duration_seconds=duration_seconds,
+        next_steps=next_steps,
+        sheet_url=sheet_url,
+    )
+
+
+def send_summary_email(stats, rows_detail, dry_run, duration_seconds=0.0):
     sender = os.environ.get("EMAIL_SENDER", "")
     pw = os.environ.get("EMAIL_PASSWORD", "")
     if not (sender and pw):
@@ -336,84 +428,19 @@ def send_summary_email(stats, rows_detail, dry_run):
         return
     if dry_run:
         recipients = [DRY_RUN_RECIPIENT]
-        subject_prefix = "[DRY RUN] "
     else:
         rec_raw = os.environ.get("EMAIL_RECIPIENT", "")
         recipients = [r.strip() for r in rec_raw.split(",") if r.strip()] or [DRY_RUN_RECIPIENT]
-        subject_prefix = ""
 
-    # "Action" = cancellations + rows skipped for unknown reason (JD must
-    # manually classify those). Phone-source issues (no_phone, phone_invalid)
-    # are tracked but auto-marked Processed Date so don't need attention.
-    skipped_unknown = (stats["skipped"] - stats["no_phone"]
-                       - stats["phone_invalid"])
-    action_count = stats["cancelled"] + skipped_unknown
-    errors = stats["errors"]
+    summary = _build_casi_summary(stats, rows_detail, dry_run, duration_seconds)
+    subject, html_body = build_run_summary_email(summary)
 
-    if errors > 0:
-        subject = (f"{subject_prefix}⚠ VW Casi Cancellations — "
-                   f"{errors} error(s); {stats['cancelled']} cancelled, "
-                   f"{skipped_unknown} to classify")
-    elif action_count == 0:
-        subject = f"{subject_prefix}✅ VW Casi Cancellations — clean (0 actions)"
-    else:
-        subject = (f"{subject_prefix}📥 VW Casi Cancellations — "
-                   f"{stats['cancelled']} cancelled, "
-                   f"{skipped_unknown} to classify")
-
-    if errors > 0:
-        banner_html = (
-            '<p style="background:#fde8ea;border:1px solid #f9c0c5;'
-            'padding:12px;border-radius:6px;color:#b81020;font-size:13px;">'
-            f'<b>⚠ {errors} error(s) reported — see table below.</b></p>'
-        )
-    elif action_count == 0:
-        banner_html = (
-            '<p style="background:#e2efda;border:1px solid #c5e0b4;'
-            'padding:12px;border-radius:6px;color:#385723;font-size:13px;">'
-            '<b>✅ Run completed clean — nothing to action today.</b></p>'
-        )
-    else:
-        banner_html = ""
-
-    rows_html = "".join(
-        f'<tr><td>{r["account"]}</td><td>{r["reason"]}</td>'
-        f'<td>{r["cover"]}</td><td>{r["status"]}</td><td>{r["notes"]}</td></tr>'
-        for r in rows_detail
-    ) or '<tr><td colspan="5" style="text-align:center;color:#888;">'\
-         'No new rows to process.</td></tr>'
-    html = (
-        f'<html><body style="font-family:Arial,sans-serif;color:#262626;">'
-        f'<h2 style="color:#1F3864;">VW Casi Cancellations</h2>'
-        f'{banner_html}'
-        f'<p style="font-size:13px;">'
-        f'<b>Examined:</b> {stats["examined"]}<br>'
-        f'<b>Already processed (skipped):</b> {stats["already_processed"]}<br>'
-        f'<b>Cancelled (incl. Not-found):</b> {stats["cancelled"]}<br>'
-        f'<b>Skipped — unknown reason:</b> '
-        f'{stats["skipped"] - stats["no_phone"] - stats["phone_invalid"]}<br>'
-        f'<b>No phone in Sales:</b> {stats["no_phone"]}<br>'
-        f'<b>Phone format invalid:</b> {stats["phone_invalid"]}<br>'
-        f'<b>Phone via account#:</b> {stats["phone_via_account_number"]}<br>'
-        f'<b>Phone via id#:</b> {stats["phone_via_id_number"]}<br>'
-        f'<b>Errors:</b> {stats["errors"]}'
-        f'</p>'
-        f'<table border="1" cellpadding="6" cellspacing="0" '
-        f'style="border-collapse:collapse;font-size:12px;">'
-        f'<tr style="background:#1F3864;color:white;">'
-        f'<th>Account</th><th>Reason</th><th>Cover</th>'
-        f'<th>Casi Status</th><th>Notes</th></tr>'
-        f'{rows_html}</table>'
-        f'<p style="font-size:11px;color:#888;">'
-        f'Generated {datetime.now(SAST).isoformat(timespec="seconds")}'
-        f'</p></body></html>'
-    )
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
-    msg.set_content("HTML email — see HTML part for the table.")
-    msg.add_alternative(html, subtype="html")
+    msg.set_content("HTML email — see HTML part for the run summary.")
+    msg.add_alternative(html_body, subtype="html")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(sender, pw)
         s.send_message(msg)
@@ -565,6 +592,7 @@ def process_rows(svc, rows, bindings, phone_maps):
 
 
 def main():
+    started = time.monotonic()
     logger.info("=" * 60)
     logger.info("CANCEL CASI REVIO")
     logger.info(f"Dry run : {DRY_RUN}")
@@ -630,7 +658,8 @@ def main():
     logger.info(f"  Errors              : {stats['errors']}")
     logger.info("=" * 60)
 
-    send_summary_email(stats, detail, dry_run=DRY_RUN)
+    send_summary_email(stats, detail, dry_run=DRY_RUN,
+                       duration_seconds=time.monotonic() - started)
 
 
 if __name__ == "__main__":

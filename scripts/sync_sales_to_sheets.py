@@ -24,13 +24,18 @@ import os
 import re
 import smtplib
 import sys
+import time
 from datetime import datetime
 from email.message import EmailMessage
+from pathlib import Path
 
 import paramiko
 import pandas as pd
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from email_template import RunSummary, build_run_summary_email  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -279,80 +284,88 @@ def _format_dt(v):
     return str(v) if v is not None else ""
 
 
-def build_summary_html(stats, preview_rows, header, bindings):
-    """Build the HTML summary table — used by both live + dry-run emails."""
-    h_acct = header[bindings["account"]] if bindings["account"] is not None else ""
-    h_ct   = header[bindings["created_time"]] if bindings["created_time"] is not None else ""
-    h_mfr  = header[bindings["manufacturer"]] if bindings["manufacturer"] is not None else ""
-    h_fn   = header[bindings["first_name"]] if bindings["first_name"] is not None else ""
-    h_ln   = header[bindings["last_name"]] if bindings["last_name"] is not None else ""
+def _build_run_summary(stats, duration_seconds):
+    new_rows = stats["new_rows"]
+    dry_run = stats["dry_run"]
+    mfr_counts = stats.get("mfr_counts") or {}
 
-    mfr_breakdown = stats.get("mfr_counts") or {}
-    mfr_lines = "".join(
-        f"<li>{k or '(blank)'}: <b>{v:,}</b></li>"
-        for k, v in sorted(mfr_breakdown.items(), key=lambda x: -x[1])
-    ) or "<li>(no breakdown — Manufacturer column not bound)</li>"
-
-    if preview_rows:
-        preview_html = (
-            '<table border="1" cellpadding="4" cellspacing="0" '
-            'style="border-collapse:collapse;font-size:12px;">'
-            '<tr style="background:#1F3864;color:white;">'
-            '<th>WesBank Account #</th><th>Manufacturer</th>'
-            '<th>Created Time</th><th>Name</th></tr>' +
-            "".join(
-                f'<tr><td>{r.get(h_acct, "")}</td>'
-                f'<td>{r.get(h_mfr, "")}</td>'
-                f'<td>{_format_dt(r.get(h_ct, ""))}</td>'
-                f'<td>{r.get(h_fn, "")} {r.get(h_ln, "")}</td></tr>'
-                for r in preview_rows
-            ) + "</table>"
+    if new_rows:
+        outcome = "success"
+        verb = "would be appended" if dry_run else "added to SALES tab"
+        headline = f"{new_rows} new sale{'s' if new_rows != 1 else ''} {verb}"
+        mfr_part = ""
+        if mfr_counts:
+            mfr_part = " (" + ", ".join(
+                f"{v} {k.title() or 'unknown'}"
+                for k, v in sorted(mfr_counts.items(), key=lambda x: -x[1])
+            ) + ")"
+        summary = (
+            f"Pulled latest {stats['source_file']} from SFTP "
+            f"({stats['file_rows']:,} rows in file). "
+            f"{new_rows:,} new sales {'would be ' if dry_run else ''}appended "
+            f"after deduping against {stats['existing_in_sales']:,} existing "
+            f"account numbers{mfr_part}. Created Time range: "
+            f"{stats['min_created']} → {stats['max_created']}."
         )
     else:
-        preview_html = "<p><i>No new rows.</i></p>"
+        outcome = "noop"
+        headline = "No new sales to append"
+        summary = (
+            f"Pulled latest {stats['source_file']} from SFTP "
+            f"({stats['file_rows']:,} rows in file). "
+            f"All {stats['existing_in_sales']:,} accounts already present in SALES — "
+            f"nothing to append."
+        )
 
-    return (
-        '<html><body style="font-family:Arial,sans-serif;color:#262626;max-width:680px;">'
-        '<div style="background:#1F3864;padding:18px;border-radius:8px 8px 0 0;">'
-        f'<h2 style="color:white;margin:0;">VW/Audi Sales Sync</h2></div>'
-        '<div style="padding:18px;background:#EBF3FB;">'
-        '<table width="100%" cellpadding="6">'
-        f'<tr><td>Source file</td><td align="right"><b>{stats["source_file"]}</b></td></tr>'
-        f'<tr><td>Total rows in file</td><td align="right"><b>{stats["file_rows"]:,}</b></td></tr>'
-        f'<tr><td>Already in SALES</td><td align="right">'
-        f'<b>{stats["existing_in_sales"]:,}</b></td></tr>'
-        f'<tr><td>{"Would-be appended" if stats["dry_run"] else "Appended"}</td>'
-        f'<td align="right"><b style="color:#375623;">{stats["new_rows"]:,}</b></td></tr>'
-        f'<tr><td>SALES rows after</td><td align="right"><b>{stats["total_after"]:,}</b></td></tr>'
-        f'<tr><td>Created Time range</td><td align="right">'
-        f'<b>{stats["min_created"]} &rarr; {stats["max_created"]}</b></td></tr>'
-        '</table>'
-        f'<h4 style="color:#1F3864;">Manufacturer breakdown</h4><ul>{mfr_lines}</ul>'
-        f'<h4 style="color:#1F3864;">First {len(preview_rows)} preview row(s)</h4>{preview_html}'
-        '</div></body></html>'
+    numbers = {
+        "Source file": stats["source_file"],
+        "Rows in source file": f"{stats['file_rows']:,}",
+        "Already in SALES": f"{stats['existing_in_sales']:,}",
+        ("Would-be appended" if dry_run else "Appended"): f"{new_rows:,}",
+        "SALES rows after": f"{stats['total_after']:,}",
+        "Created Time range": f"{stats['min_created']} → {stats['max_created']}",
+    }
+    if mfr_counts:
+        numbers["By Manufacturer"] = ", ".join(
+            f"{k or '(blank)'}: {v:,}"
+            for k, v in sorted(mfr_counts.items(), key=lambda x: -x[1])
+        )
+
+    sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid=0"
+
+    return RunSummary(
+        workflow_name="VW Sales Sync",
+        run_date=datetime.now(),
+        mode="dry_run" if dry_run else "production",
+        outcome=outcome,
+        headline=headline,
+        summary_paragraph=summary,
+        numbers=numbers,
+        duration_seconds=duration_seconds,
+        sheet_url=sheet_url,
     )
 
 
-def send_summary_email(stats, preview_rows, header, bindings):
+def send_summary_email(stats, duration_seconds=0.0):
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
         logger.warning("EMAIL_SENDER / EMAIL_PASSWORD not set — skipping email")
         return
     if stats["dry_run"]:
         recipients = [DRY_RUN_RECIPIENT]
-        subject = f"[DRY RUN] VW/Audi Sales Sync — {stats['new_rows']} would-be new row(s)"
     else:
         recipients = [r.strip() for r in EMAIL_RECIPIENT.split(",") if r.strip()]
         if not recipients:
             recipients = [DRY_RUN_RECIPIENT]
-        subject = f"VW/Audi Sales Sync — {stats['new_rows']} new row(s) added"
+
+    summary = _build_run_summary(stats, duration_seconds)
+    subject, html_body = build_run_summary_email(summary)
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"]    = EMAIL_SENDER
     msg["To"]      = ", ".join(recipients)
-    msg.set_content("HTML email — see HTML part for the table.")
-    msg.add_alternative(build_summary_html(stats, preview_rows, header, bindings),
-                        subtype="html")
+    msg.set_content("HTML email — see HTML part for the run summary.")
+    msg.add_alternative(html_body, subtype="html")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(EMAIL_SENDER, EMAIL_PASSWORD)
         s.send_message(msg)
@@ -362,6 +375,7 @@ def send_summary_email(stats, preview_rows, header, bindings):
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main():
     run_dt = datetime.utcnow()
+    started = time.monotonic()
     logger.info("=" * 60)
     logger.info("VW/AUDI SALES SYNC (raw passthrough)")
     logger.info("Run date : %s UTC", run_dt.isoformat(timespec="seconds"))
@@ -509,7 +523,7 @@ def main():
         "mfr_counts":        mfr_counts,
         "dry_run":           DRY_RUN,
     }
-    send_summary_email(stats, new_rows[:5], header, bindings)
+    send_summary_email(stats, duration_seconds=time.monotonic() - started)
 
     logger.info("=" * 60)
     logger.info("DONE — %s", "would have appended" if DRY_RUN else "appended")

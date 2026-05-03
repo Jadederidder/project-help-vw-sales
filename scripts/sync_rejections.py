@@ -39,10 +39,15 @@ import os
 import re
 import smtplib
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from email_template import RunSummary, build_run_summary_email  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +324,10 @@ def append_rows(service, aligned):
 def send_heartbeat_email(run_date, reason, dry_run=False):
     """Sent when there's nothing meaningful to process — distinguishable
     subject (`[HEARTBEAT]`) so JD can filter. `reason` is a one-line body
-    explaining which heartbeat case fired."""
+    explaining which heartbeat case fired.
+
+    Deliberately plain-text and outside the RunSummary template — the
+    [HEARTBEAT] prefix is a stable filter signal in JD's mailbox."""
     sender  = os.environ.get("EMAIL_SENDER")
     pwd     = os.environ.get("EMAIL_PASSWORD")
     recip_s = os.environ.get("EMAIL_RECIPIENT", "")
@@ -361,8 +369,64 @@ def send_heartbeat_email(run_date, reason, dry_run=False):
                 " (DRY RUN)" if dry_run else "")
 
 
+def _build_rejections_summary(run_date, source_email_dates, stats, dedupe_skipped,
+                              new_count, dry_run, error_summary, duration_seconds):
+    plural = "s" if new_count != 1 else ""
+    src_label = ", ".join(d.strftime("%Y-%m-%d %H:%M") for d in source_email_dates) \
+                or "(no source emails)"
+
+    if error_summary:
+        outcome = "failure"
+        headline = "Error during rejections sync"
+        summary = (
+            f"Sync failed before completion. {error_summary}. "
+            f"No rows appended; manual investigation needed."
+        )
+    else:
+        outcome = "success"
+        headline = f"{new_count} new rejection{plural} appended"
+        summary = (
+            f"Pulled Telesales Audittrail email(s) ({src_label}). "
+            f"{stats.get('examined', 0)} CSV rows examined; after filtering "
+            f"{stats.get('skipped_a', 0)} acceptance(s) and "
+            f"{stats.get('skipped_dup', 0)} duplicate-VAP row(s), "
+            f"{new_count} real rejection{plural} {'would be ' if dry_run else ''}appended."
+        )
+
+    numbers = {
+        "Source email(s)": src_label,
+        "CSV rows examined": stats.get("examined", 0),
+        "A acceptances filtered": stats.get("skipped_a", 0),
+        "Duplicate-VAP filtered": stats.get("skipped_dup", 0),
+        "Already in REJECTIONS": dedupe_skipped,
+        ("Would-be appended" if dry_run else "Real rejections appended"): new_count,
+        "Malformed rows": stats.get("malformed", 0),
+    }
+
+    next_steps = []
+    if error_summary:
+        next_steps.append(f"Investigate: {error_summary}")
+
+    sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
+
+    return RunSummary(
+        workflow_name="VW Rejections Sync",
+        run_date=run_date,
+        mode="dry_run" if dry_run else "production",
+        outcome=outcome,
+        headline=headline,
+        summary_paragraph=summary,
+        numbers=numbers,
+        duration_seconds=duration_seconds,
+        next_steps=next_steps,
+        sheet_url=sheet_url,
+    )
+
+
+
 def send_summary_email(run_date, source_email_dates, stats, dedupe_skipped,
-                       new_count, dry_run=False, error_summary=""):
+                       new_count, dry_run=False, error_summary="",
+                       duration_seconds=0.0):
     sender  = os.environ.get("EMAIL_SENDER")
     pwd     = os.environ.get("EMAIL_PASSWORD")
     recip_s = os.environ.get("EMAIL_RECIPIENT", "")
@@ -377,46 +441,24 @@ def send_summary_email(run_date, source_email_dates, stats, dedupe_skipped,
         logger.warning("No recipients — skipping summary email")
         return
 
-    plural = "s" if new_count != 1 else ""
-    date_label = run_date.strftime("%d %b %Y")
-    if error_summary:
-        subject = f"⚠ VW Rejections — error during sync ({date_label})"
-    elif new_count == 0:
-        subject = f"✅ VW Rejections — clean ({date_label})"
-    else:
-        subject = f"📥 VW Rejections — {new_count} new rejection{plural} ({date_label})"
-    if dry_run:
-        subject = f"[DRY RUN] {subject}"
-
-    src_lines = ", ".join(d.strftime("%Y-%m-%d %H:%M") for d in source_email_dates) \
-                or "(no source emails)"
-
-    body_lines = [
-        f"VW/Audi Rejections daily sync — {run_date.strftime('%d %b %Y %H:%M %Z')}",
-        "",
-    ]
-    if not error_summary and new_count == 0:
-        body_lines += ["  ✅ Run completed clean — nothing to action today.", ""]
-    body_lines += [
-        f"  Source emails       : {src_lines}",
-        f"  CSV rows examined   : {stats.get('examined', 0)}",
-        f"  Filtered: A rows    : {stats.get('skipped_a', 0)}",
-        f"  Filtered: dup VAPs  : {stats.get('skipped_dup', 0)}",
-        f"  Skipped: in-sheet   : {dedupe_skipped}",
-        f"  {'Would-be appended' if dry_run else 'Appended'}: {new_count}",
-        f"  Malformed rows      : {stats.get('malformed', 0)}",
-    ]
-    if error_summary:
-        body_lines += ["", f"ERROR: {error_summary}"]
-    if dry_run:
-        body_lines += ["", "DRY RUN — no rows were written."]
-    body = "\n".join(body_lines) + "\n"
+    summary = _build_rejections_summary(
+        run_date=run_date,
+        source_email_dates=source_email_dates,
+        stats=stats,
+        dedupe_skipped=dedupe_skipped,
+        new_count=new_count,
+        dry_run=dry_run,
+        error_summary=error_summary,
+        duration_seconds=duration_seconds,
+    )
+    subject, html_body = build_run_summary_email(summary)
 
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"]    = sender
     msg["To"]      = ", ".join(recipients)
-    msg.set_content(body)
+    msg.set_content("HTML email — see HTML part for the run summary.")
+    msg.add_alternative(html_body, subtype="html")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(sender, pwd)
@@ -435,6 +477,7 @@ def main():
     )
 
     run_date = datetime.now(timezone.utc)
+    started = time.monotonic()
     logger.info("=" * 60)
     logger.info("VW/AUDI REJECTIONS SYNC")
     logger.info("Run date : %s", run_date.isoformat(timespec="seconds"))
@@ -492,6 +535,7 @@ def main():
                 new_count=0,
                 dry_run=DRY_RUN,
                 error_summary=f"ZIP parse failed for {m['zip_name']}: {e}",
+                duration_seconds=time.monotonic() - started,
             )
             sys.exit(1)
 
@@ -564,6 +608,7 @@ def main():
         dedupe_skipped=dupes,
         new_count=len(new_rows),
         dry_run=DRY_RUN,
+        duration_seconds=time.monotonic() - started,
     )
 
     logger.info("=" * 60)
