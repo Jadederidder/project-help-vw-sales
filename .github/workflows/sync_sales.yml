@@ -43,6 +43,9 @@ jobs:
       - name: Export account drilldown data to JSON
         env:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          # Used only on duplicate-tab collision to email JD a failure alert.
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
         run: python scripts/export_accounts.py
 
       - name: Export summary data to JSON
