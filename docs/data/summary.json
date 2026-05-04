@@ -1,10 +1,10 @@
 {
-  "lastUpdated": "2026-05-04T12:13:00Z",
+  "lastUpdated": "2026-05-04T16:24:30Z",
   "kpis": {
-    "netPolicies": 1686,
-    "revenue": 0,
-    "churnPct": 9.5,
-    "rejectionPct": 3.7
+    "netPolicies": 1728,
+    "revenue": 157642,
+    "churnPct": 9.3,
+    "rejectionPct": 3.6
   },
   "months": [
     {
@@ -145,37 +145,37 @@
     },
     {
       "month": "Apr 2026",
-      "gross": 140,
+      "gross": 180,
       "cancel": 5,
       "reject": 3,
-      "net": 132,
-      "netInd": 132,
-      "netFam": 0,
-      "cumNet": 1686,
-      "indRev": 11748,
-      "famRev": 0,
-      "totalRevCum": 153764,
+      "net": 171,
+      "netInd": 170,
+      "netFam": 1,
+      "cumNet": 1725,
+      "indRev": 15130,
+      "famRev": 159,
+      "totalRevCum": 157305,
       "collected": null,
-      "vwInvoice": 31779.65,
+      "vwInvoice": 32511.51,
       "vwLock": null,
-      "rev": 11748
+      "rev": 15289
     },
     {
       "month": "May 2026",
-      "gross": 0,
+      "gross": 3,
       "cancel": null,
       "reject": null,
-      "net": 0,
-      "netInd": 0,
-      "netFam": 0,
-      "cumNet": 1686,
-      "indRev": 0,
-      "famRev": 0,
-      "totalRevCum": null,
+      "net": 3,
+      "netInd": 2,
+      "netFam": 1,
+      "cumNet": 1728,
+      "indRev": 178,
+      "famRev": 159,
+      "totalRevCum": 157642,
       "collected": null,
-      "vwInvoice": null,
+      "vwInvoice": 32581.1,
       "vwLock": null,
-      "rev": null
+      "rev": 337
     }
   ]
 }
