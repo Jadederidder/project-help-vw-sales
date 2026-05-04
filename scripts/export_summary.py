@@ -73,7 +73,7 @@ COLUMN_ALIASES = {
     "cumNet":      ["cum net subs"],
     "indRev":      ["individual revenue"],
     "famRev":      ["family revenue"],
-    "totalRevCum": ["cumulative revenue"],
+    "totalRevCum": ["current monthly billing", "cumulative revenue"],
     "collected":   ["collected revenue"],
     "vwInvoice":   ["vw total book -invoice", "vw total book invoice"],
     "vwLock":      ["vw billing lock"],
