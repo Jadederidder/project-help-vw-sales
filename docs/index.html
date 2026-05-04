@@ -841,7 +841,7 @@
         <div class="card-title">Monthly Performance Breakdown</div>
         <div class="card-desc">Gross eligible · Cancellations · Rejections · Net Individual &amp; Family · Revenue breakdown · Collected · VW Invoice &amp; Lock</div>
       </div>
-      <div class="card-badge">9 Months</div>
+      <div class="card-badge" id="months-badge"></div>
     </div>
     <div class="card-body" style="padding-left:0;padding-right:0;padding-bottom:0;">
       <div class="tbl-wrap">
@@ -1386,6 +1386,12 @@ async function init() {
   document.getElementById('status-label').textContent = period;
   const cardPeriod = document.getElementById('card-period');
   if (cardPeriod) cardPeriod.textContent = period;
+
+  const monthsBadge = document.getElementById('months-badge');
+  if (monthsBadge) {
+    const n = data.monthly.length;
+    monthsBadge.textContent = `${n} ${n === 1 ? 'Month' : 'Months'}`;
+  }
 
   const hdrUpdated = document.getElementById('hdr-updated');
   if (hdrUpdated && data.lastUpdated) {
