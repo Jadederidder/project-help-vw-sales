@@ -1180,7 +1180,7 @@ function renderTable({ monthly }) {
       + '<td class="tag-cum">' + fmtN(r.cumNet) + '</td>'
       + '<td>' + fmtR(r.indRev) + '</td>'
       + '<td>' + (r.famRev > 0 ? fmtR(r.famRev) : dash) + '</td>'
-      + '<td class="tag-cum">' + fmtR(r.totalRevCum) + '</td>'
+      + '<td class="tag-cum">' + (r.totalRevCum != null ? fmtR(r.totalRevCum) : dash) + '</td>'
       + '<td>' + (r.collected != null ? fmtR(r.collected) : dash) + '</td>'
       + '<td>' + (r.vwInvoice != null ? fmtR(r.vwInvoice) : dash) + '</td>'
       + '<td' + (r.vwLock != null && r.vwLock !== 0 ? ' class="lock-paid"' : '') + '>' + (r.vwLock != null ? fmtR(r.vwLock) : dash) + '</td>'
