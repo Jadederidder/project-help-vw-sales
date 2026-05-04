@@ -391,6 +391,7 @@
     .tag-cancel { color: var(--warn);   font-weight: 600; }
     .tag-reject { color: var(--purple); font-weight: 600; }
     .tag-cum    { color: var(--navy);   font-weight: 800; }
+    .lock-paid  { background: #D4EDDA; }
 
     /* inline sparkbar */
     .bar-cell { display: flex; align-items: center; gap: 10px; }
@@ -862,7 +863,7 @@
               <th>VW Book Invoice</th>
               <th>
                 VW Billing Lock
-                <div style="font-size:9px;font-weight:500;letter-spacing:0.3px;text-transform:none;color:rgba(255,255,255,0.48);margin-top:3px;">Locked at invoice date</div>
+                <div style="font-size:9px;font-weight:500;letter-spacing:0.3px;text-transform:none;color:rgba(255,255,255,0.48);margin-top:3px;">Locked &amp; paid</div>
               </th>
               <th style="text-align:right;padding-right:22px;">Details</th>
             </tr>
@@ -1095,7 +1096,7 @@ function renderTable({ monthly }) {
       + '<td class="tag-cum">' + fmtR(r.totalRevCum) + '</td>'
       + '<td>' + (r.collected != null ? fmtR(r.collected) : dash) + '</td>'
       + '<td>' + (r.vwInvoice != null ? fmtR(r.vwInvoice) : dash) + '</td>'
-      + '<td>' + (r.vwLock    != null ? fmtR(r.vwLock)    : dash) + '</td>'
+      + '<td' + (r.vwLock != null && r.vwLock !== 0 ? ' class="lock-paid"' : '') + '>' + (r.vwLock != null ? fmtR(r.vwLock) : dash) + '</td>'
       + '<td class="td-action">' + (canDrill ? '<button class="btn-drill">View accounts</button>' : dash) + '</td>'
       + '</tr>';
   }
