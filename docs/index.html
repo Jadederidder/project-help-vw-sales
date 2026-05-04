@@ -1196,8 +1196,8 @@ function renderTable({ monthly }) {
     + '<td>' + fmtN(tot.netInd) + '</td>'
     + '<td>' + fmtN(tot.netFam) + '</td>'
     + '<td>' + fmtN(tot.cumNet) + '</td>'
-    + '<td>' + fmtR(tot.indRev) + '</td>'
-    + '<td>' + fmtR(tot.famRev) + '</td>'
+    + '<td>' + dash + '</td>'                                                  /* Individual Revenue — totals row deliberately blank */
+    + '<td>' + dash + '</td>'                                                  /* Family Revenue — totals row deliberately blank */
     + '<td>' + dash + '</td>'                                                  /* Current Monthly Billing — per-row cells are cumulative; totals row deliberately blank */
     + '<td>' + (tot.collected != null ? fmtR(tot.collected) : dash) + '</td>'
     + '<td>' + (tot.vwInvoice != null ? fmtR(tot.vwInvoice) : dash) + '</td>'
