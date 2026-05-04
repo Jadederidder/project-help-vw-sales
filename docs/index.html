@@ -1080,7 +1080,7 @@ function renderTable({ monthly }) {
   let html = '';
   for (const r of monthly) {
     const pct        = Math.round((r.gross / maxGross) * 100);
-    const canDrill   = r.month in SHEET_MAP;
+    const canDrill   = acctMonthSet.has(monthKeyFromLabel(r.month));
     const rowAttr    = canDrill ? ' data-month="' + r.month + '"' : '';
     html += '<tr' + rowAttr + '>'
       + '<td>' + r.month + '</td>'
@@ -1130,27 +1130,30 @@ function renderTable({ monthly }) {
 }
 
 /* ================================================================
-   INVOICE DATA TAB MAP  (sale month → Invoice Data tab + filename key)
-   Tab name = sale month + 6 months, created by sync_monthly_invoice.py
+   MONTH-LABEL HELPERS  ("Apr 2026" ↔ "2026-04")
    ================================================================ */
-const INVOICE_TAB_MAP = {
-  'Aug 2025': { tab: "Feb'26 Invoice Data", ym: '2025-08' },
-  'Sep 2025': { tab: "Mar'26 Invoice Data", ym: '2025-09' },
-  'Oct 2025': { tab: "Apr'26 Invoice Data", ym: '2025-10' },
-  'Nov 2025': { tab: "May'26 Invoice Data", ym: '2025-11' },
-  'Dec 2025': { tab: "Jun'26 Invoice Data", ym: '2025-12' },
-  'Jan 2026': { tab: "Jul'26 Invoice Data", ym: '2026-01' },
-  'Feb 2026': { tab: "Aug'26 Invoice Data", ym: '2026-02' },
-  'Mar 2026': { tab: "Sep'26 Invoice Data", ym: '2026-03' },
-  'Apr 2026': { tab: "Oct'26 Invoice Data", ym: '2026-04' },
-  'May 2026': { tab: "Nov'26 Invoice Data", ym: '2026-05' },
-};
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun',
+                    'Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function monthKeyFromLabel(label) {
+  // "Apr 2026" → "2026-04"; null on bad input.
+  if (!label) return null;
+  const parts = String(label).split(' ');
+  if (parts.length !== 2) return null;
+  const idx = MONTH_ABBR.indexOf(parts[0]);
+  if (idx < 0) return null;
+  return `${parts[1]}-${String(idx + 1).padStart(2, '0')}`;
+}
 
 let currentModalMonth = null;
 
 async function downloadClientList() {
-  if (!currentModalMonth || !(currentModalMonth in INVOICE_TAB_MAP)) return;
-  const { tab, ym } = INVOICE_TAB_MAP[currentModalMonth];
+  if (!currentModalMonth) return;
+  const ym = monthKeyFromLabel(currentModalMonth);
+  if (!ym) return;
+  const data = await loadAccountsFile();
+  const tab = (data && data.tabs) ? data.tabs[ym] : null;
+  if (!tab) return;
   const btn = document.getElementById('btn-modal-download');
   const origHTML = btn.innerHTML;
   btn.disabled = true;
@@ -1195,46 +1198,35 @@ async function downloadClientList() {
     alert('Could not download client list:\n\n' + err.message + '\n\nMake sure the Google Sheet is shared publicly and the Invoice Data tab exists for this month.');
   } finally {
     btn.innerHTML = origHTML;
-    btn.disabled = !(currentModalMonth in INVOICE_TAB_MAP);
+    btn.disabled = !acctMonthSet.has(monthKeyFromLabel(currentModalMonth));
   }
 }
 
 /* ================================================================
    ACCOUNT DRILLDOWN
+   Data file is dual-shape (see scripts/export_accounts.py):
+     { months: { "YYYY-MM": [...] }, tabs: { "YYYY-MM": "tab name" },
+       "YYYY-MM": [...]  // legacy top-level mirror, retained for safe
+                         // frontend rollback. Drop in a follow-up PR. }
+   The frontend reads the nested .months / .tabs only.
    ================================================================ */
-const SHEET_MAP = {
-  'Aug 2025': 'Feb26 Data',
-  'Sep 2025': 'Mar26 Data',
-  'Oct 2025': 'April26 Data',
-  'Nov 2025': 'May26 Data',
-  'Dec 2025': 'Jun26 Data',
-  'Jan 2026': 'Jul26 Data',
-  'Feb 2026': 'Aug26 Data',
-  'Mar 2026': 'Sep26 Data',
-};
-
-// Accounts data is pre-built by the sync workflow into docs/data/accounts.json
-// This avoids needing the Google Sheet to be publicly accessible.
 let acctData = null;
+let acctMonthSet = new Set();
 
 async function loadAccountsFile() {
   if (acctData) return acctData;
   const res = await fetch('./data/accounts.json?t=' + Date.now());
   if (!res.ok) throw new Error('HTTP ' + res.status);
   acctData = await res.json();
+  acctMonthSet = new Set(Object.keys((acctData && acctData.months) || {}));
   return acctData;
 }
 
-const MONTH_KEY_MAP = {
-  'Aug 2025': '2025-08', 'Sep 2025': '2025-09', 'Oct 2025': '2025-10',
-  'Nov 2025': '2025-11', 'Dec 2025': '2025-12', 'Jan 2026': '2026-01',
-  'Feb 2026': '2026-02', 'Mar 2026': '2026-03',
-};
-
 async function fetchAccounts(month) {
   const data = await loadAccountsFile();
-  const key  = MONTH_KEY_MAP[month] || month;
-  return data[key] || [];
+  const key  = monthKeyFromLabel(month);
+  if (!key) return [];
+  return ((data && data.months) || {})[key] || [];
 }
 
 function openModal(month) {
@@ -1247,7 +1239,7 @@ function openModal(month) {
   bodyEl.innerHTML = `<div class="modal-state"><div class="spinner"></div><span>Loading accounts…</span></div>`;
   currentModalMonth = month;
   const dlBtn = document.getElementById('btn-modal-download');
-  if (dlBtn) dlBtn.disabled = !(month in INVOICE_TAB_MAP);
+  if (dlBtn) dlBtn.disabled = !acctMonthSet.has(monthKeyFromLabel(month));
   modal.classList.add('open');
   document.body.style.overflow = 'hidden';
 
@@ -1366,7 +1358,18 @@ function showDashboardError(message) {
 async function init() {
   let data;
   try {
-    data = await loadSummary();
+    // Fetch summary + accounts files in parallel so renderTable can read
+    // acctMonthSet for the row-level "View accounts" gate. accounts.json
+    // is best-effort: if it fails, the dashboard still renders, just
+    // without any drilldown buttons.
+    const [summary] = await Promise.all([
+      loadSummary(),
+      loadAccountsFile().catch(err => {
+        console.warn('[Dashboard] accounts.json unavailable — drilldown buttons will be hidden:', err);
+        return null;
+      }),
+    ]);
+    data = summary;
   } catch (e) {
     showDashboardError(e && e.message ? e.message : String(e));
     return;

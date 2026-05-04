@@ -5,6 +5,15 @@ on:
     - cron: "13 15 * * 1"
 
   workflow_dispatch:
+    inputs:
+      skip_sales_sync:
+        description: "Skip sync_sales_to_sheets step (no off-cycle team email)"
+        type: boolean
+        default: false
+      skip_pending_recheck:
+        description: "Skip the convert_account_expiry --pending-recheck-only step"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,6 +41,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Sync sales to Google Sheets
+        if: ${{ !inputs.skip_sales_sync }}
         env:
           SFTP_PASSWORD:              ${{ secrets.SFTP_PASSWORD }}
           GOOGLE_SHEETS_CREDENTIALS:  ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
@@ -43,6 +53,9 @@ jobs:
       - name: Export account drilldown data to JSON
         env:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          # Used only on duplicate-tab collision to email JD a failure alert.
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
         run: python scripts/export_accounts.py
 
       - name: Export summary data to JSON
@@ -74,6 +87,7 @@ jobs:
         run: gh workflow run deploy_pages.yml --ref main
 
       - name: Re-check PENDING_CONVERSIONS (weekly maintenance)
+        if: ${{ !inputs.skip_pending_recheck }}
         env:
           REVIO_API_KEY:                ${{ secrets.REVIO_API_KEY }}
           REVIO_BRAND_ID:               ${{ secrets.REVIO_BRAND_ID }}
