@@ -236,6 +236,30 @@ def build_payload():
 
     months.sort(key=lambda m: _month_key(m["month"]))
 
+    # Ghost-month blanking: when a month's cumulative cells are byte-
+    # identical to the prior month AND that month had no new gross sales,
+    # the master-sheet formula has carried forward stale values from the
+    # prior month (typical for the just-started current month before any
+    # sales land). Emit null for those cells so the dashboard renders them
+    # as "—" rather than visually re-asserting last month's number.
+    # The gross-zero clause guards the corner case where K=L=0 (every
+    # gross sale rejected) — in that case the cumulative figures would
+    # also stay flat, but the row carries legit data we want to preserve.
+    for prev, curr in zip(months, months[1:]):
+        if (
+            curr.get("vwInvoice") is not None
+            and curr.get("vwInvoice")   == prev.get("vwInvoice")
+            and curr.get("totalRevCum") == prev.get("totalRevCum")
+            and not (curr.get("gross") or 0)
+        ):
+            logger.info(
+                "Blanking ghost-carried cumulative cells on %s "
+                "(vwInvoice + totalRevCum identical to %s, gross=0)",
+                curr["month"], prev["month"],
+            )
+            curr["vwInvoice"]   = None
+            curr["totalRevCum"] = None
+
     latest = months[-1]
     net_policies = latest.get("cumNet") or 0
     revenue      = latest.get("totalRevCum") or 0
