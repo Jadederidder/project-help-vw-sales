@@ -65,33 +65,90 @@ logger = logging.getLogger(__name__)
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"
 DRY_RUN_RECIPIENT = "jd@projecthelp.co.za"
 
-# Three flags we want set to False on every BTC. Order matches the master-doc
-# §4.2 ordering for log readability.
+# Three flags we want set to False on every active BTC. Order matches the
+# master-doc §4.2 ordering for log readability.
 COMM_FLAGS = (
     "send_invoice_on_add_subscriber",
     "send_invoice_on_charge_failure",
     "send_receipt",
 )
 
+# The PATCH payload is locked to exactly these three keys — defensive
+# belt-and-braces against any future code path accidentally injecting a
+# `status` field or anything else that could mutate subscriber state.
+# patch_client_silent() asserts on this set before each PATCH call.
+ALLOWED_PATCH_FIELDS = frozenset(COMM_FLAGS)
+
+# Per Revio API spec, BillingTemplateClient.status has four documented
+# values. We patch only "active" — see master doc §4.2 / PR #26 follow-up:
+# patching paused clients risks unintended side-effects (e.g. resuming a
+# paused debit). inactive + pending are read-only per API.
+ACTIVE_STATUS = "active"
+KNOWN_INACTIVE_STATUSES = frozenset({
+    "subscription_paused",
+    "inactive",
+    "pending",
+})
+
 
 # ─── Pure: identify which clients need patching ──────────────────────────────
 def identify_clients_to_patch(clients):
-    """Pure function. `clients` is a list of BillingTemplateClient dicts as
-    returned by Revio.
+    """Pure function. Bucket every BTC by what we should do with it.
 
-    Returns a list of {"client": <full dict>, "non_silent_flags": {flag: value}}
-    for each BTC where at least one of the three comm flags is not False.
-    Strictly tests `is not False` (not `== False`) so that missing keys or
-    truthy non-bool values are correctly flagged for patching. A BTC where
-    all three flags are already False is skipped (idempotent — no PATCH
-    would change anything).
+    Returns a dict with six lists of {"client": <full BTC dict>,
+    "non_silent_flags": {flag: value}}:
+
+      to_patch                  — status=active AND ≥1 comm flag not False
+      skipped_already_silent    — status=active AND all 3 comm flags already
+                                  False (idempotent skip — no wasted PATCH)
+      skipped_paused            — status=subscription_paused (any flag state)
+      skipped_inactive          — status=inactive             (any flag state)
+      skipped_pending           — status=pending              (any flag state)
+      skipped_unknown_status    — anything else, including missing/None status
+
+    Why we restrict to active: PR #26 dry-run surfaced that the raw BTC
+    count (8,071) was inflated by paused/inactive subscribers across
+    OLD BILLING templates. JD's call: patching a paused client risks
+    unintended re-activation if a flag flip is interpreted as a state
+    change downstream. Active subscribers are the only ones whose comm
+    flags fire in production anyway, so the others are pure noise to
+    touch.
+
+    Strictly tests `is not False` for flag values — missing keys / truthy
+    non-bool values are flagged for patching. The status filter is exact
+    string equality (case-sensitive) per Revio API spec.
     """
-    needs_patch = []
+    buckets = {
+        "to_patch":                 [],
+        "skipped_already_silent":   [],
+        "skipped_paused":           [],
+        "skipped_inactive":         [],
+        "skipped_pending":          [],
+        "skipped_unknown_status":   [],
+    }
+
     for c in clients:
         non_silent = {f: c.get(f) for f in COMM_FLAGS if c.get(f) is not False}
-        if non_silent:
-            needs_patch.append({"client": c, "non_silent_flags": non_silent})
-    return needs_patch
+        entry = {"client": c, "non_silent_flags": non_silent}
+        status = c.get("status")
+
+        if status == ACTIVE_STATUS:
+            if non_silent:
+                buckets["to_patch"].append(entry)
+            else:
+                buckets["skipped_already_silent"].append(entry)
+        elif status == "subscription_paused":
+            buckets["skipped_paused"].append(entry)
+        elif status == "inactive":
+            buckets["skipped_inactive"].append(entry)
+        elif status == "pending":
+            buckets["skipped_pending"].append(entry)
+        else:
+            # Unknown status: anything not in the four documented values,
+            # including None / missing. Logged + counted but never patched.
+            buckets["skipped_unknown_status"].append(entry)
+
+    return buckets
 
 
 # ─── Revio reads ─────────────────────────────────────────────────────────────
@@ -162,16 +219,35 @@ def _get_form_headers():
     }
 
 
+def _assert_patch_payload_safe(payload):
+    """Pre-flight: PATCH payload must contain ONLY the three comm-flag
+    keys. Belt-and-braces against any future code path accidentally
+    injecting a `status` field or any other key that would mutate
+    subscriber state. Raises RuntimeError on violation."""
+    extra = set(payload.keys()) - ALLOWED_PATCH_FIELDS
+    if extra:
+        raise RuntimeError(
+            f"PATCH payload contains unexpected keys: {sorted(extra)}. "
+            f"Only the 3 comm flags are permitted to prevent accidental "
+            f"modification of subscriber state (e.g. status field). "
+            f"Allowed: {sorted(ALLOWED_PATCH_FIELDS)}."
+        )
+
+
 def patch_client_silent(template_id, btc_id):
     """PATCH /billing_templates/{tid}/clients/{btc_id}/ with the three
     comm flags set to false. Returns True on success.
 
     Form-data per Revio API spec (not JSON). On any failure the caller
     decides how to surface — this function returns False rather than
-    raising, so one bad client doesn't block the rest of the run."""
+    raising, so one bad client doesn't block the rest of the run.
+
+    Payload is built locally from COMM_FLAGS only — _assert_payload_safe
+    is the safety net even if a future change accidentally adds a key."""
     url = (REVIO_API_BASE_URL
            + f"/billing_templates/{template_id}/clients/{btc_id}/")
     data = {flag: "false" for flag in COMM_FLAGS}
+    _assert_patch_payload_safe(data)
     r = _do_request_with_retry(
         "patch", url,
         headers=_get_form_headers(),
@@ -190,8 +266,14 @@ def patch_client_silent(template_id, btc_id):
 
 # ─── Email ───────────────────────────────────────────────────────────────────
 def _build_summary(run_date, templates_examined, clients_examined,
-                   patched, would_patch, skipped_silent, errors,
-                   patched_detail, dry_run, error_summary, duration_seconds):
+                   patched, would_patch, skipped_already_silent,
+                   skipped_paused, skipped_inactive, skipped_pending,
+                   skipped_unknown_status, errors, patched_detail,
+                   dry_run, error_summary, duration_seconds):
+    n_action = would_patch if dry_run else patched
+    skipped_total_inactive = (skipped_paused + skipped_inactive
+                              + skipped_pending + skipped_unknown_status)
+
     if error_summary:
         outcome = "failure"
         headline = "Error during silence backfill"
@@ -199,33 +281,41 @@ def _build_summary(run_date, templates_examined, clients_examined,
             f"Backfill failed before completion. {error_summary}. "
             f"Manual investigation needed."
         )
-    elif not (patched or would_patch):
+    elif n_action == 0:
         outcome = "noop"
-        headline = "All subscribers already silent"
+        headline = "No active subscribers need patching"
         summary = (
             f"Examined {clients_examined} subscriber(s) across "
-            f"{templates_examined} template(s). All flags already false — "
-            f"nothing to patch."
+            f"{templates_examined} template(s). "
+            f"{skipped_already_silent} active subscriber(s) already silent. "
+            f"{skipped_total_inactive} non-active subscriber(s) skipped "
+            f"(paused/inactive/pending/unknown). Nothing to patch."
         )
     else:
         outcome = "success"
         verb = "would be silenced" if dry_run else "silenced"
-        n_action = would_patch if dry_run else patched
-        headline = f"{n_action} subscriber(s) {verb}"
+        headline = f"{n_action} active subscriber(s) {verb}"
         summary = (
             f"Examined {clients_examined} subscriber(s) across "
             f"{templates_examined} template(s). "
-            f"{n_action} {verb}, "
-            f"{skipped_silent} already silent (skipped), "
+            f"{n_action} active subscriber(s) {verb}, "
+            f"{skipped_already_silent} active already silent, "
+            f"{skipped_total_inactive} non-active skipped "
+            f"({skipped_paused} paused / {skipped_inactive} inactive / "
+            f"{skipped_pending} pending / {skipped_unknown_status} unknown), "
             f"{errors} error(s)."
         )
 
     numbers = {
         "Templates examined": templates_examined,
         "Subscribers examined": clients_examined,
-        ("Subscribers that would be patched" if dry_run
-         else "Subscribers patched"): would_patch if dry_run else patched,
-        "Already silent (skipped)": skipped_silent,
+        ("Active — would be patched" if dry_run
+         else "Active — patched"): n_action,
+        "Active — already silent": skipped_already_silent,
+        "Skipped (subscription_paused)": skipped_paused,
+        "Skipped (inactive)": skipped_inactive,
+        "Skipped (pending)": skipped_pending,
+        "Skipped (unknown status)": skipped_unknown_status,
         "Errors": errors,
     }
 
@@ -247,7 +337,7 @@ def _build_summary(run_date, templates_examined, clients_examined,
                 f"… and {len(patched_detail) - 25} more "
                 f"(see workflow logs for full list)"
             )
-        next_steps.append("Subscribers targeted: " + " | ".join(bullets))
+        next_steps.append("Active subscribers targeted: " + " | ".join(bullets))
         if dry_run:
             next_steps.append(
                 "Re-run with DRY_RUN=false to apply the patches."
@@ -267,9 +357,10 @@ def _build_summary(run_date, templates_examined, clients_examined,
 
 
 def send_summary_email(run_date, *, templates_examined, clients_examined,
-                       patched, would_patch, skipped_silent, errors,
-                       patched_detail, dry_run, error_summary="",
-                       duration_seconds=0.0):
+                       patched, would_patch, skipped_already_silent,
+                       skipped_paused, skipped_inactive, skipped_pending,
+                       skipped_unknown_status, errors, patched_detail,
+                       dry_run, error_summary="", duration_seconds=0.0):
     sender = os.environ.get("EMAIL_SENDER")
     pwd = os.environ.get("EMAIL_PASSWORD")
     recip_s = os.environ.get("EMAIL_RECIPIENT", "")
@@ -290,7 +381,11 @@ def send_summary_email(run_date, *, templates_examined, clients_examined,
         clients_examined=clients_examined,
         patched=patched,
         would_patch=would_patch,
-        skipped_silent=skipped_silent,
+        skipped_already_silent=skipped_already_silent,
+        skipped_paused=skipped_paused,
+        skipped_inactive=skipped_inactive,
+        skipped_pending=skipped_pending,
+        skipped_unknown_status=skipped_unknown_status,
         errors=errors,
         patched_detail=patched_detail,
         dry_run=dry_run,
@@ -336,10 +431,17 @@ def main():
     clients_examined = 0
     patched = 0
     would_patch = 0
-    skipped_silent = 0
+    skipped_already_silent = 0
+    skipped_paused = 0
+    skipped_inactive = 0
+    skipped_pending = 0
+    skipped_unknown_status = 0
     errors = 0
     patched_detail = []  # list of {"client": ..., "non_silent_flags": ..., "template_title": ...}
-    by_template_counts = defaultdict(lambda: {"examined": 0, "to_patch": 0, "silent": 0})
+    by_template_counts = defaultdict(lambda: {
+        "examined": 0, "to_patch": 0, "active_silent": 0,
+        "paused": 0, "inactive": 0, "pending": 0, "unknown": 0,
+    })
 
     try:
         templates = list_subscription_templates()
@@ -357,19 +459,52 @@ def main():
             clients_examined += len(clients)
             by_template_counts[ttitle]["examined"] += len(clients)
 
-            to_patch = identify_clients_to_patch(clients)
-            silent_count = len(clients) - len(to_patch)
-            skipped_silent += silent_count
-            by_template_counts[ttitle]["silent"] += silent_count
-            by_template_counts[ttitle]["to_patch"] += len(to_patch)
+            buckets = identify_clients_to_patch(clients)
+            t_to_patch        = len(buckets["to_patch"])
+            t_active_silent   = len(buckets["skipped_already_silent"])
+            t_paused          = len(buckets["skipped_paused"])
+            t_inactive        = len(buckets["skipped_inactive"])
+            t_pending         = len(buckets["skipped_pending"])
+            t_unknown         = len(buckets["skipped_unknown_status"])
+
+            skipped_already_silent  += t_active_silent
+            skipped_paused          += t_paused
+            skipped_inactive        += t_inactive
+            skipped_pending         += t_pending
+            skipped_unknown_status  += t_unknown
+            by_template_counts[ttitle]["to_patch"]      += t_to_patch
+            by_template_counts[ttitle]["active_silent"] += t_active_silent
+            by_template_counts[ttitle]["paused"]        += t_paused
+            by_template_counts[ttitle]["inactive"]      += t_inactive
+            by_template_counts[ttitle]["pending"]       += t_pending
+            by_template_counts[ttitle]["unknown"]       += t_unknown
 
             logger.info(
-                "Template %s (%s): %d subscriber(s), %d already silent, "
-                "%d to patch", tid, ttitle, len(clients), silent_count,
-                len(to_patch),
+                "Template %s (%s): examined=%d active_to_patch=%d "
+                "active_silent=%d paused=%d inactive=%d pending=%d unknown=%d",
+                tid, ttitle, len(clients), t_to_patch, t_active_silent,
+                t_paused, t_inactive, t_pending, t_unknown,
             )
 
-            for item in to_patch:
+            # Log a one-line trace for each non-active skip so the audit
+            # trail in the workflow log shows exactly what was bypassed.
+            for bucket_name, label in (
+                ("skipped_paused", "paused"),
+                ("skipped_inactive", "inactive"),
+                ("skipped_pending", "pending"),
+                ("skipped_unknown_status", "unknown_status"),
+            ):
+                for item in buckets[bucket_name]:
+                    c = item["client"]
+                    logger.info(
+                        "  skip[%s] btc_id=%s personal_code=%s status=%r",
+                        label,
+                        c.get("id") or c.get("client_id"),
+                        c.get("personal_code") or "∅",
+                        c.get("status"),
+                    )
+
+            for item in buckets["to_patch"]:
                 c = item["client"]
                 btc_id = c.get("id") or c.get("client_id")
                 pcode = c.get("personal_code") or "∅"
@@ -380,7 +515,7 @@ def main():
                 if DRY_RUN:
                     logger.info(
                         "[DRY RUN] would PATCH template=%s btc_id=%s "
-                        "personal_code=%s flags_to_flip=%s "
+                        "personal_code=%s status=active flags_to_flip=%s "
                         "current_values=%s",
                         tid, btc_id, pcode, list(flags.keys()), flags,
                     )
@@ -408,13 +543,25 @@ def main():
                     errors += 1
 
         logger.info("─" * 60)
-        logger.info("Per-template summary:")
+        logger.info("Per-template summary (active_to_patch / active_silent / "
+                    "paused / inactive / pending / unknown):")
         for ttitle, counts in by_template_counts.items():
             logger.info(
-                "  %s: examined=%d to_patch=%d silent=%d",
+                "  %s: examined=%d active_to_patch=%d active_silent=%d "
+                "paused=%d inactive=%d pending=%d unknown=%d",
                 ttitle, counts["examined"], counts["to_patch"],
-                counts["silent"],
+                counts["active_silent"], counts["paused"],
+                counts["inactive"], counts["pending"], counts["unknown"],
             )
+        logger.info("─" * 60)
+        logger.info(
+            "Totals: templates=%d examined=%d active_to_patch=%d "
+            "active_silent=%d paused=%d inactive=%d pending=%d unknown=%d",
+            templates_examined, clients_examined,
+            would_patch if DRY_RUN else patched,
+            skipped_already_silent, skipped_paused, skipped_inactive,
+            skipped_pending, skipped_unknown_status,
+        )
 
         send_summary_email(
             run_date=run_date,
@@ -422,7 +569,11 @@ def main():
             clients_examined=clients_examined,
             patched=patched,
             would_patch=would_patch,
-            skipped_silent=skipped_silent,
+            skipped_already_silent=skipped_already_silent,
+            skipped_paused=skipped_paused,
+            skipped_inactive=skipped_inactive,
+            skipped_pending=skipped_pending,
+            skipped_unknown_status=skipped_unknown_status,
             errors=errors,
             patched_detail=patched_detail,
             dry_run=DRY_RUN,
@@ -438,7 +589,11 @@ def main():
                 clients_examined=clients_examined,
                 patched=patched,
                 would_patch=would_patch,
-                skipped_silent=skipped_silent,
+                skipped_already_silent=skipped_already_silent,
+                skipped_paused=skipped_paused,
+                skipped_inactive=skipped_inactive,
+                skipped_pending=skipped_pending,
+                skipped_unknown_status=skipped_unknown_status,
                 errors=errors,
                 patched_detail=patched_detail,
                 dry_run=DRY_RUN,

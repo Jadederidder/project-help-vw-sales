@@ -21,7 +21,11 @@ jobs:
   silence:
     name: Silence existing Revio subscribers
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Bumped from 30 → 60 in PR #26 follow-up. Active-only filter will cut
+    # the patch volume dramatically vs the original 8,071-row dry-run, but
+    # the headroom is cheap and the listing pass alone took 6m+ for the
+    # full subscriber set. Better margin than tight margin.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
