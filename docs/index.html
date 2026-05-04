@@ -204,12 +204,18 @@
     }
 
     /* ── KPI GRID ───────────────────────────────────────────────── */
+    /* 5 tiles in 3+2 layout: top row (operational) spans full width
+       across cols 1-2, 3-4, 5-6; bottom row (commercial) is centered
+       across cols 2-3 and 4-5, leaving cols 1 and 6 empty.            */
     .kpi-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       gap: 18px;
       margin-bottom: 28px;
     }
+    .kpi-grid > .kpi:nth-child(-n+3) { grid-column: span 2; }
+    .kpi-grid > .kpi:nth-child(4)    { grid-column: 2 / span 2; }
+    .kpi-grid > .kpi:nth-child(5)    { grid-column: 4 / span 2; }
 
     .kpi {
       background: var(--white);
@@ -722,6 +728,7 @@
     /* ── RESPONSIVE ─────────────────────────────────────────────── */
     @media (max-width: 900px) {
       .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+      .kpi-grid > .kpi:nth-child(n) { grid-column: auto; }
       .hdr-top  { padding: 22px 20px 18px; }
       .wrap     { padding: 24px 20px 40px; }
     }
@@ -807,15 +814,15 @@
       <div class="kpi-caption">Rejections ÷ gross eligible</div>
     </div>
 
-    <!-- Bottom row: commercial -->
-    <div class="kpi">
+    <!-- Bottom row: commercial (centered 2 below the operational 3) -->
+    <div class="kpi kpi--warn">
       <div class="kpi-icon-row">
-        <div class="kpi-icon kpi-icon--green">💰</div>
-        <span class="kpi-trend kpi-trend--up">↑ Earned</span>
+        <div class="kpi-icon kpi-icon--warn">⏳</div>
+        <span class="kpi-trend kpi-trend--neutral">Owed</span>
       </div>
-      <div class="kpi-label">VW Total Earnings to Date</div>
-      <div class="kpi-value kpi-value--md" id="v-revenue">—</div>
-      <div class="kpi-caption">VW's ~20.67% share of gross premium</div>
+      <div class="kpi-label">VW Future Earnings</div>
+      <div class="kpi-value kpi-value--md" id="v-future-earnings">—</div>
+      <div class="kpi-caption">Invoiced &amp; not yet locked + paid</div>
     </div>
 
     <div class="kpi">
@@ -826,16 +833,6 @@
       <div class="kpi-label">Earned &amp; Paid</div>
       <div class="kpi-value kpi-value--md" id="v-earned-paid">—</div>
       <div class="kpi-caption">Locked &amp; settled to date</div>
-    </div>
-
-    <div class="kpi kpi--warn">
-      <div class="kpi-icon-row">
-        <div class="kpi-icon kpi-icon--warn">⏳</div>
-        <span class="kpi-trend kpi-trend--neutral">Owed</span>
-      </div>
-      <div class="kpi-label">Earned &amp; Owed</div>
-      <div class="kpi-value kpi-value--md" id="v-earned-owed">—</div>
-      <div class="kpi-caption">Invoiced, awaiting lock &amp; pay</div>
     </div>
 
   </div>
@@ -880,8 +877,8 @@
               <th>Cumulative Net</th>
               <th>Individual Revenue</th>
               <th>Family Revenue</th>
-              <th>Cumulative Revenue</th>
-              <th>Cumulative Collected</th>
+              <th>Current Monthly Billing</th>
+              <th>Monthly Collected</th>
               <th>
                 VW Book Invoice
                 <div style="font-size:9px;font-weight:500;letter-spacing:0.3px;text-transform:none;color:rgba(255,255,255,0.48);margin-top:3px;">Cumulative — VW's share of premium</div>
@@ -987,29 +984,29 @@ const fmtR = n => 'R\u202F' + Number(n).toLocaleString('en-ZA');
    ================================================================ */
 function renderKPIs({ kpis, monthly }) {
   document.getElementById('v-policies').textContent  = fmtN(kpis.netPolicies);
-  document.getElementById('v-revenue').textContent   = fmtR(kpis.revenue);
   document.getElementById('v-churn').textContent     = kpis.churnRate + '%';
   document.getElementById('v-rejection').textContent = kpis.rejectionRate + '%';
 
-  // Earned & Paid: sum vwLock across populated cells (Aug + Sep today).
-  // Earned & Owed: total ever invoiced (cumulative) − total ever paid.
-  // vwInvoice is cumulative in the source so we use the FIELD_SEMANTICS
-  // 'last' helper rather than open-coding — single source of truth with
-  // the totals row. If a manual data-entry mistake makes vwLock exceed
-  // total invoiced, clamp to zero and warn rather than render negative.
+  // VW Future Earnings: total billed across every monthly invoice
+  // − total paid. Each Q-column row is that month's invoice for cumulative
+  // book-to-date (full re-bill, not incremental), so we sum across
+  // populated months. Earned & Paid: sum vwLock populated cells.
+  // FIELD_SEMANTICS helpers used as the single source of truth with the
+  // totals row. If manual data-entry makes vwLock exceed total invoiced,
+  // clamp to zero and warn rather than render negative.
   const totalInvoicedEver = totalForField(monthly, 'vwInvoice') || 0;
   const earnedPaid        = totalForField(monthly, 'vwLock')    || 0;
-  let   earnedOwed        = totalInvoicedEver - earnedPaid;
-  if (earnedOwed < 0) {
+  let   futureEarnings    = totalInvoicedEver - earnedPaid;
+  if (futureEarnings < 0) {
     console.warn(
       `[KPI] Earned & Paid (R${earnedPaid.toFixed(2)}) exceeds total ` +
       `invoiced (R${totalInvoicedEver.toFixed(2)}). Likely a manual data-` +
-      `entry error in vwLock or vwInvoice. Clamping Earned & Owed to 0.`
+      `entry error in vwLock or vwInvoice. Clamping VW Future Earnings to 0.`
     );
-    earnedOwed = 0;
+    futureEarnings = 0;
   }
-  document.getElementById('v-earned-paid').textContent = fmtR(earnedPaid);
-  document.getElementById('v-earned-owed').textContent = fmtR(earnedOwed);
+  document.getElementById('v-earned-paid').textContent     = fmtR(earnedPaid);
+  document.getElementById('v-future-earnings').textContent = fmtR(futureEarnings);
 }
 
 /* ================================================================
@@ -1129,11 +1126,16 @@ const FIELD_SEMANTICS = {
   famRev:      'sum',
   cumNet:      'last',           // cumulative running total in source
   totalRevCum: 'last',           // cumulative; all-time = April's value
-  collected:   'last',           // cumulative; all-time = March's value
-                                 // (April's collected is null — `last`
-                                 // walks back to the latest non-null)
-  vwInvoice:   'last',           // cumulative (per master-sheet formula
-                                 // O+P+Q[prev], confirmed monotonic)
+  collected:   'sum',            // per-month banking deposits (not
+                                 // cumulative); totals row sums all
+                                 // monthly bankings since launch
+  vwInvoice:   'sum',            // each row = that month's invoice for
+                                 // cumulative book-to-date (full re-bill,
+                                 // not incremental). Total ever invoiced
+                                 // = sum across populated months. The
+                                 // ghost-month-detection in export_
+                                 // summary.py nulls May's carry-forward
+                                 // value before the sum.
   vwLock:      'sum-populated',  // each row is its own locked cohort,
                                  // never cumulative; empty ≠ zero
 };
@@ -1196,7 +1198,7 @@ function renderTable({ monthly }) {
     + '<td>' + fmtN(tot.cumNet) + '</td>'
     + '<td>' + fmtR(tot.indRev) + '</td>'
     + '<td>' + fmtR(tot.famRev) + '</td>'
-    + '<td>' + fmtR(tot.totalRevCum) + '</td>'
+    + '<td>' + dash + '</td>'                                                  /* Current Monthly Billing — per-row cells are cumulative; totals row deliberately blank */
     + '<td>' + (tot.collected != null ? fmtR(tot.collected) : dash) + '</td>'
     + '<td>' + (tot.vwInvoice != null ? fmtR(tot.vwInvoice) : dash) + '</td>'
     + '<td>' + (tot.vwLock    != null ? fmtR(tot.vwLock)    : dash) + '</td>'
