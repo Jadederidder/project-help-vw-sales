@@ -1195,7 +1195,7 @@ function renderTable({ monthly }) {
     + '<td>' + fmtN(tot.reject) + '</td>'
     + '<td>' + fmtN(tot.netInd) + '</td>'
     + '<td>' + fmtN(tot.netFam) + '</td>'
-    + '<td>' + fmtN(tot.cumNet) + '</td>'
+    + '<td>' + dash + '</td>'                                                  /* Cumulative Net — totals row deliberately blank (latest row already shows running total) */
     + '<td>' + dash + '</td>'                                                  /* Individual Revenue — totals row deliberately blank */
     + '<td>' + dash + '</td>'                                                  /* Family Revenue — totals row deliberately blank */
     + '<td>' + dash + '</td>'                                                  /* Current Monthly Billing — per-row cells are cumulative; totals row deliberately blank */
