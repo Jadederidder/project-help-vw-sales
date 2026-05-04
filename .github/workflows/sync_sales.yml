@@ -7,7 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       skip_sales_sync:
-        description: "Skip sync_sales_to_sheets step (rebuild dashboard JSONs only)"
+        description: "Skip sync_sales_to_sheets step (no off-cycle team email)"
+        type: boolean
+        default: false
+      skip_pending_recheck:
+        description: "Skip the convert_account_expiry --pending-recheck-only step"
         type: boolean
         default: false
 
@@ -83,6 +87,7 @@ jobs:
         run: gh workflow run deploy_pages.yml --ref main
 
       - name: Re-check PENDING_CONVERSIONS (weekly maintenance)
+        if: ${{ !inputs.skip_pending_recheck }}
         env:
           REVIO_API_KEY:                ${{ secrets.REVIO_API_KEY }}
           REVIO_BRAND_ID:               ${{ secrets.REVIO_BRAND_ID }}
