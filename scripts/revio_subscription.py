@@ -16,6 +16,20 @@ Endpoint shapes are per the official docs JD shared on 2026-05-01:
 
 Imported by scripts/convert_account_expiry.py. Not run directly.
 
+Customer-facing comms (master doc §4.2):
+  Per Revio's BillingTemplateClient spec, three booleans govern subscriber
+  emails:
+    send_invoice_on_add_subscriber  → welcome invoice on add
+    send_invoice_on_charge_failure  → invoice on failed debit
+    send_receipt                    → receipt on successful debit
+
+  ALL THREE default to False here so end-customers receive zero monthly
+  emails — the contract VW signed up for. Each is independently overridable
+  via env var (REVIO_SEND_WELCOME_INVOICE / _FAILURE_INVOICE / _RECEIPT)
+  for future flexibility, but the production default is silent. The
+  one-off scripts/silence_existing_revio_subscribers.py applies the same
+  triple-False to every existing BillingTemplateClient.
+
 Run-locally example (smoke test of helpers only — no network):
     python3 -c "
     from scripts.revio_subscription import compute_next_debit_date
@@ -56,6 +70,30 @@ def _brand_id():
     POST /billing_templates/{id}/add_subscriber/. Read at call-time so
     tests can patch via os.environ."""
     return os.environ.get("REVIO_BRAND_ID", "")
+
+
+# Customer-facing comm flags. Production default is ALL FALSE — VW's
+# subscribers should receive zero monthly emails (master doc §4.2).
+# Each flag is independently overridable via env var (read at call-time
+# so tests / workflow_dispatch can override). Any case-insensitive match
+# of "true" enables that one comm; everything else (default, "false",
+# "0", "") leaves it silent.
+_COMM_ENV_VARS = {
+    "send_invoice_on_add_subscriber": "REVIO_SEND_WELCOME_INVOICE",
+    "send_invoice_on_charge_failure": "REVIO_SEND_FAILURE_INVOICE",
+    "send_receipt":                   "REVIO_SEND_RECEIPT",
+}
+
+
+def _read_comm_flags():
+    """Returns {flag_name: bool} for the three Revio comm flags. Default
+    False; env var must be exactly "true" (case-insensitive) to enable.
+    Centralised so add_subscriber and the silence-existing backfill share
+    one source of truth."""
+    return {
+        flag: os.environ.get(env_var, "").lower() == "true"
+        for flag, env_var in _COMM_ENV_VARS.items()
+    }
 
 DAY_28_FALLBACK = 28
 
@@ -384,17 +422,26 @@ def add_subscriber(template_id, client_id, scheduled_date,
        already on the template, skip POST. This handles the "create succeeded
        but add_subscriber failed last time" case.
     2. POST add_subscriber with retry on transient errors.
+
+    Customer-facing comm flags (master doc §4.2): all three default to
+    False so subscribers receive no welcome invoice, no failure invoice
+    and no monthly receipt. Override individually via REVIO_SEND_WELCOME_
+    INVOICE / _FAILURE_INVOICE / _RECEIPT.
     """
+    comm_flags = _read_comm_flags()
     payload = {
         "client_id":                            client_id,
         "subscription_billing_scheduled_on":    scheduled_date,  # YYYY-MM-DD
         "invoice_reference":                    invoice_reference,
-        "send_invoice_on_add_subscriber":       True,
         "brand_id":                             _brand_id(),
+        **comm_flags,
     }
     if dry_run:
-        logger.info("[DRY RUN] POST /billing_templates/%s/add_subscriber/ payload=%s",
-                    template_id, payload)
+        logger.info(
+            "[DRY RUN] POST /billing_templates/%s/add_subscriber/ "
+            "comm_flags=%s payload=%s",
+            template_id, comm_flags, payload,
+        )
         return None
 
     if is_already_subscriber(template_id, client_id):
