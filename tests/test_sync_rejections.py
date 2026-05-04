@@ -8,6 +8,7 @@ import os
 import sys
 import unittest
 import zipfile
+from unittest.mock import MagicMock
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts import sync_rejections as sr
@@ -250,6 +251,155 @@ class ZipParseAndFilter(unittest.TestCase):
 
 def _normalise(row):
     return tuple(row[k] for k, _, _ in sr.FIELDS)
+
+
+# ─── Existing-account-numbers dedup (H ∪ J) ──────────────────────────────────
+# The 8-col "legacy" REJECTIONS header (no conversion cols yet)
+LEGACY_HEADER = ["ACCEPT/REJECT IND", "VAP SUPPLIER", "PRODUCT TERM",
+                 "EFFECTIVE DATE", "POLICY COST", "ACCEPTED REJECTED",
+                 "ERROR MESSAGE", "ACCOUNT_NUMBER"]
+
+# The 10-col header after convert_account_expiry's first run
+HEADER_WITH_CONVERSION_COLS = LEGACY_HEADER + [
+    "Conversion_Status",          # col I
+    "Original_Account_Number",    # col J
+]
+
+
+def _mock_service_for_batchget(value_ranges):
+    """Build a mock Sheets service whose batchGet returns the given
+    valueRanges payload. value_ranges = [{"values": [[...], ...]}, ...]."""
+    svc = MagicMock()
+    svc.spreadsheets.return_value.values.return_value.batchGet.return_value \
+        .execute.return_value = {"valueRanges": value_ranges}
+    return svc
+
+
+class FindHeaderIdx(unittest.TestCase):
+    def test_canonical_match(self):
+        self.assertEqual(
+            sr._find_header_idx(HEADER_WITH_CONVERSION_COLS,
+                                "Original_Account_Number"),
+            9,
+        )
+
+    def test_case_and_whitespace_insensitive(self):
+        # Same column under various cosmetic variants → all resolve to 9
+        for variant in ["original account number",
+                        "ORIGINAL_ACCOUNT_NUMBER",
+                        "Original Account Number"]:
+            self.assertEqual(
+                sr._find_header_idx(HEADER_WITH_CONVERSION_COLS, variant),
+                9,
+                msg=variant,
+            )
+
+    def test_missing_returns_none(self):
+        self.assertIsNone(
+            sr._find_header_idx(LEGACY_HEADER, "Original_Account_Number"),
+        )
+
+
+class ReadExistingAccountNumbersUnion(unittest.TestCase):
+    """Verifies the H ∪ J dedup contract introduced to fix the
+    sync_rejections / convert_account_expiry interaction.
+
+    Master doc §4.5: convert_account_expiry blanks col H and stashes the
+    original account in col J while a row is mid-conversion. Dedup must
+    therefore read both cols, otherwise daily Wesbank re-sends of the same
+    rejection get re-appended."""
+
+    def setUp(self):
+        self.bindings = sr.bind_sheet_columns(HEADER_WITH_CONVERSION_COLS)
+
+    def test_J_only_value_is_in_existing_set(self):
+        """H is blank, J has a value → that value must appear in the set,
+        i.e. a fresh Wesbank send of the same account would be deduped."""
+        svc = _mock_service_for_batchget([
+            {"values": [[""], [""], [""]]},                  # col H all blank
+            {"values": [["87015446128"],                      # col J populated
+                        ["87018636314"],
+                        ["87015476892"]]},
+        ])
+        out = sr.read_existing_account_numbers(
+            svc, self.bindings, HEADER_WITH_CONVERSION_COLS,
+        )
+        self.assertEqual(out, {"87015446128", "87018636314", "87015476892"})
+
+    def test_H_and_J_with_different_values_both_in_set(self):
+        """Mixed: some rows untouched (H populated, J blank), others
+        in-flight (H blank, J populated). Both contribute."""
+        svc = _mock_service_for_batchget([
+            {"values": [["87000000001"], [""],         ["87000000003"]]},
+            {"values": [[""],            ["87000000002"], [""]]},
+        ])
+        out = sr.read_existing_account_numbers(
+            svc, self.bindings, HEADER_WITH_CONVERSION_COLS,
+        )
+        self.assertEqual(out,
+                         {"87000000001", "87000000002", "87000000003"})
+
+    def test_blank_in_both_columns_excluded(self):
+        """A row where both H and J are blank contributes nothing —
+        defensive against malformed/empty rows in the sheet."""
+        svc = _mock_service_for_batchget([
+            {"values": [["87000000001"], [""], [""]]},
+            {"values": [[""],            [""], ["87000000003"]]},
+        ])
+        out = sr.read_existing_account_numbers(
+            svc, self.bindings, HEADER_WITH_CONVERSION_COLS,
+        )
+        self.assertEqual(out, {"87000000001", "87000000003"})
+        self.assertNotIn("", out)
+
+    def test_normalises_account_values(self):
+        """Long ints, .0-suffixed floats, and whitespace must be normalised
+        to the canonical string form before union — otherwise '87015446128'
+        from H wouldn't match '87015446128.0' from J."""
+        svc = _mock_service_for_batchget([
+            {"values": [[87015446128]]},          # int from H
+            {"values": [[" 87015446128.0 "]]},    # whitespace + .0 from J
+        ])
+        out = sr.read_existing_account_numbers(
+            svc, self.bindings, HEADER_WITH_CONVERSION_COLS,
+        )
+        # Both representations collapse to one canonical string
+        self.assertEqual(out, {"87015446128"})
+
+    def test_falls_back_to_H_only_when_J_missing(self):
+        """Legacy tab without the conversion cols → only H is read, no
+        crash, warning logged. Required so the script keeps working on
+        any sheet that hasn't yet had convert_account_expiry add the
+        Conversion_Status / Original_Account_Number columns."""
+        bindings = sr.bind_sheet_columns(LEGACY_HEADER)
+        svc = MagicMock()
+        svc.spreadsheets.return_value.values.return_value.batchGet \
+            .return_value.execute.return_value = {
+                "valueRanges": [{"values": [["87000000001"], ["87000000002"]]}],
+            }
+        out = sr.read_existing_account_numbers(svc, bindings, LEGACY_HEADER)
+        self.assertEqual(out, {"87000000001", "87000000002"})
+
+        # Verify only one range was requested (H), not two
+        call = svc.spreadsheets.return_value.values.return_value \
+            .batchGet.call_args
+        self.assertEqual(len(call.kwargs["ranges"]), 1)
+
+    def test_two_ranges_requested_when_J_present(self):
+        """Verifies the single-API-call contract: one batchGet, two ranges."""
+        svc = _mock_service_for_batchget([
+            {"values": []},
+            {"values": []},
+        ])
+        sr.read_existing_account_numbers(
+            svc, self.bindings, HEADER_WITH_CONVERSION_COLS,
+        )
+        call = svc.spreadsheets.return_value.values.return_value \
+            .batchGet.call_args
+        self.assertEqual(len(call.kwargs["ranges"]), 2)
+        # H = col 8 → 'H', J = col 10 → 'J'
+        self.assertIn("REJECTIONS!H2:H", call.kwargs["ranges"])
+        self.assertIn("REJECTIONS!J2:J", call.kwargs["ranges"])
 
 
 if __name__ == "__main__":

@@ -70,6 +70,15 @@ DRY_RUN_RECIPIENT = "jd@projecthelp.co.za"
 # whitespace-tolerant.
 DUPLICATE_VAP_PREFIX = "a vap of this category already exists"
 
+# convert_account_expiry.py blanks col H and stashes the original account
+# number in col J ("Original_Account_Number") while a row is in flight
+# (PENDING / CONVERTED / ERROR). See master doc §4.5 — the dashboard formula
+# `REJECTIONS!H:H<>""` depends on H being blank for in-flight rows.
+# Dedup must therefore read the UNION of H and J, otherwise daily Wesbank
+# resends of the same account expiry rejection get re-appended as duplicates
+# (their account numbers live in J, not H, until age-out).
+REJECTIONS_ORIGINAL_ACCOUNT_COL = "Original_Account_Number"
+
 # Logical field → (CSV column header, sheet column header).
 # Both sides are matched via _norm (case + whitespace + underscore + slash
 # insensitive) so minor variants like "ACCEPT_REJECT_IND" still bind.
@@ -270,20 +279,66 @@ def bind_sheet_columns(sheet_headers):
     }
 
 
-def read_existing_account_numbers(service, sheet_bindings):
-    idx = sheet_bindings.get("account_number")
-    if idx is None:
+def _find_header_idx(sheet_headers, name):
+    """Case/whitespace/underscore-insensitive header lookup. Returns 0-based
+    column index or None. Mirrors the bind_sheet_columns matching logic so
+    minor header variants ("Original_Account_Number", "ORIGINAL ACCOUNT
+    NUMBER", etc.) all resolve to the same column."""
+    target = _norm(name)
+    for i, h in enumerate(sheet_headers):
+        if _norm(h) == target:
+            return i
+    return None
+
+
+def read_existing_account_numbers(service, sheet_bindings, sheet_headers):
+    """Returns the set of account numbers already present in REJECTIONS,
+    drawn from the UNION of col H (ACCOUNT_NUMBER) and col J
+    (Original_Account_Number).
+
+    Why the union: convert_account_expiry.py's state machine blanks H and
+    stashes the original in J while a row is mid-conversion (see master
+    doc §4.5). If we only read H, the daily Wesbank re-send of the same
+    ACCOUNT EXPIRY rejection appears "new" and gets appended as a duplicate.
+
+    Falls back to H-only with a warning if the J column isn't present —
+    keeps the script working on tabs that haven't yet had the conversion
+    columns added.
+    """
+    h_idx = sheet_bindings.get("account_number")
+    if h_idx is None:
         raise RuntimeError(f"{TAB_NAME} has no ACCOUNT_NUMBER column")
-    letter = _col_letter(idx)
-    res = service.spreadsheets().values().get(
+    h_letter = _col_letter(h_idx)
+    h_range = f"{TAB_NAME}!{h_letter}2:{h_letter}"
+
+    j_idx = _find_header_idx(sheet_headers, REJECTIONS_ORIGINAL_ACCOUNT_COL)
+    ranges = [h_range]
+    if j_idx is None:
+        logger.warning(
+            "%s has no %s column — dedup will read col %s only. "
+            "In-flight rows (PENDING/CONVERTED/ERROR) will not be "
+            "deduped and may be re-appended on Wesbank resend.",
+            TAB_NAME, REJECTIONS_ORIGINAL_ACCOUNT_COL, h_letter,
+        )
+    else:
+        j_letter = _col_letter(j_idx)
+        ranges.append(f"{TAB_NAME}!{j_letter}2:{j_letter}")
+
+    res = service.spreadsheets().values().batchGet(
         spreadsheetId=SHEET_ID,
-        range=f"{TAB_NAME}!{letter}2:{letter}",
+        ranges=ranges,
         valueRenderOption="UNFORMATTED_VALUE",
     ).execute()
-    return {
-        v for v in (_normalise_account(row[0]) for row in res.get("values", []) if row)
-        if v
-    }
+
+    existing = set()
+    for vr in res.get("valueRanges", []):
+        for row in vr.get("values", []):
+            if not row:
+                continue
+            v = _normalise_account(row[0])
+            if v:
+                existing.add(v)
+    return existing
 
 
 def align_to_sheet(rows, sheet_bindings, num_sheet_cols):
@@ -552,8 +607,8 @@ def main():
                      "(headers seen: %s)", missing_sheet, header)
         sys.exit(2)
 
-    existing = read_existing_account_numbers(service, sheet_bindings)
-    logger.info("Existing ACCOUNT_NUMBERs in REJECTIONS: %d", len(existing))
+    existing = read_existing_account_numbers(service, sheet_bindings, header)
+    logger.info("Existing ACCOUNT_NUMBERs in REJECTIONS (H ∪ J): %d", len(existing))
 
     # Dedupe within this run AND against the sheet
     new_rows = []
