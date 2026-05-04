@@ -1,10 +1,10 @@
 {
-  "lastUpdated": "2026-05-04T16:24:30Z",
+  "lastUpdated": "2026-05-04T20:07:02Z",
   "kpis": {
     "netPolicies": 1728,
     "revenue": 157642,
     "churnPct": 9.3,
-    "rejectionPct": 3.6
+    "rejectionPct": 3.7
   },
   "months": [
     {
@@ -147,7 +147,7 @@
       "month": "Apr 2026",
       "gross": 180,
       "cancel": 5,
-      "reject": 3,
+      "reject": 4,
       "net": 171,
       "netInd": 170,
       "netFam": 1,
