@@ -1,0 +1,45 @@
+name: VW Rejections — Duplicate Cleanup (one-off)
+
+# Manual-trigger only. This is a one-off cleanup that deletes rows from the
+# REJECTIONS tab — never run on a cron. DRY_RUN defaults to "true" so a
+# stray click previews instead of deleting.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — preview duplicates only, no sheet writes, email jd only"
+        required: false
+        default: "true"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Identify and remove duplicate rejection rows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run cleanup
+        env:
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          DRY_RUN:                   ${{ github.event.inputs.dry_run }}
+        run: python scripts/cleanup_rejections_duplicates.py
