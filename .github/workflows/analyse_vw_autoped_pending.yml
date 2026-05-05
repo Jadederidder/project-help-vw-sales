@@ -1,0 +1,40 @@
+name: Diagnostic — VW + Auto Ped Pending Analysis (one-off)
+
+# Manual-trigger only. Read-only against Revio (GETs only). Always
+# emails JD only — diagnostic deliverable, not a production dump.
+# Designed to be deletable after the question is answered.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  analyse:
+    name: Analyse VW + Auto Ped pending
+    runs-on: ubuntu-latest
+    # ~205 records × 1 GET each + a small template-listing pass.
+    # 15 min is generous; the dump's 60 was for 7K GETs.
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pending diagnostic
+        env:
+          REVIO_API_KEY:   ${{ secrets.REVIO_API_KEY }}
+          REVIO_BRAND_ID:  ${{ secrets.REVIO_BRAND_ID }}
+          EMAIL_SENDER:    ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:  ${{ secrets.EMAIL_PASSWORD }}
+        run: python scripts/analyse_vw_autoped_pending.py
