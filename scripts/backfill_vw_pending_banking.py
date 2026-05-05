@@ -367,6 +367,7 @@ def _write_summary(ws, s):
         ("VW pending examined",            s["vw_examined"]),
         ("VW already OK (skipped)",        s["vw_already_ok"]),
         ("VW patched / would-patch",       s["vw_patched"]),
+        ("VW dedup-skipped (sibling BTC)", s.get("vw_dedup_skipped", 0)),
         ("VW no SALES match (manual)",     s["vw_no_match"]),
         ("VW SALES data also bad",         s["vw_sales_bad"]),
         ("VW PATCH errors",                s["vw_errors"]),
@@ -532,6 +533,7 @@ def send_email(run_date, summary, attachment_path, error_summary,
             "VW already OK":                summary["vw_already_ok"],
             ("VW would-patch" if DRY_RUN else "VW patched"):
                                             summary["vw_patched"],
+            "VW dedup-skipped (sibling)":   summary.get("vw_dedup_skipped", 0),
             "VW no SALES match":            summary["vw_no_match"],
             "VW SALES data bad":            summary["vw_sales_bad"],
             "VW errors":                    summary["vw_errors"],
@@ -594,7 +596,9 @@ def main():
     )
     summary = {
         "vw_examined": 0, "vw_already_ok": 0, "vw_patched": 0,
-        "vw_no_match": 0, "vw_sales_bad": 0, "vw_errors": 0,
+        "vw_no_match": 0, "vw_sales_bad": 0,
+        "vw_dedup_skipped": 0,  # client_id already PATCHed earlier in run
+        "vw_errors": 0,
         "auto_ped_examined": 0, "auto_ped_listed": 0,
     }
     vw_actions = []
@@ -650,6 +654,14 @@ def main():
                 logger.info("  …fetched %d / %d", n, len(unique_cids))
 
         # ── VW remediation pass ──────────────────────────────────────────────
+        # Client-level dedupe: the diagnostic showed avg ~3.5 BTCs per
+        # client (one client had 10 dupes on Auto Pedigree R89). For
+        # the same client_id appearing multiple times in vw_pending we
+        # only PATCH the first time — subsequent BTC rows are listed
+        # in the workbook with outcome=already_patched_this_run so the
+        # sheet is honest, but we don't waste 3 PATCHes / hit the same
+        # Client thrice with the same payload.
+        patched_this_run = set()  # client_ids
         for ttitle, btc in vw_pending:
             summary["vw_examined"] += 1
             cid = btc.get("client_id")
@@ -673,6 +685,17 @@ def main():
                 "patch_bank_code":   "",
                 "note":              "",
             }
+
+            if cid and cid in patched_this_run:
+                # This client_id already received its (would-)PATCH on
+                # an earlier BTC row in this run. Don't double-patch
+                # the same Client; just record the BTC for visibility.
+                summary["vw_dedup_skipped"] += 1
+                vw_actions.append({**base_action,
+                                   "outcome": "already_patched_this_run",
+                                   "note": ("Client already PATCHed earlier "
+                                            "in this run via another BTC")})
+                continue
 
             # Already-OK short-circuit
             if (probe_bank_account(client_acc) == "ok"
@@ -723,6 +746,8 @@ def main():
 
             if DRY_RUN:
                 summary["vw_patched"] += 1
+                if cid:
+                    patched_this_run.add(cid)
                 vw_actions.append({**base_action, "outcome": "would_patch",
                                    "note": "DRY RUN — not sent to Revio"})
                 continue
@@ -730,6 +755,8 @@ def main():
             ok = patch_client_banking(cid, payload)
             if ok:
                 summary["vw_patched"] += 1
+                if cid:
+                    patched_this_run.add(cid)
                 vw_actions.append({**base_action, "outcome": "patched",
                                    "note": "PATCH /clients/ → 200"})
             else:
@@ -772,6 +799,28 @@ def main():
             summary["auto_ped_listed"] += 1
 
         # ── Workbook + audit + email ─────────────────────────────────────────
+        # Workflow-log self-sufficiency: dump every bucket count so
+        # the run is fully describable from the log alone, without
+        # cracking open the Excel or the email.
+        logger.info("─" * 60)
+        logger.info("VW SUMMARY (DRY RUN=%s)", DRY_RUN)
+        logger.info("  examined                : %d", summary["vw_examined"])
+        logger.info("  already_ok              : %d", summary["vw_already_ok"])
+        logger.info("  %s          : %d",
+                    "would_patch" if DRY_RUN else "patched    ",
+                    summary["vw_patched"])
+        logger.info("  no_sales_match          : %d", summary["vw_no_match"])
+        logger.info("  sales_data_bad          : %d", summary["vw_sales_bad"])
+        logger.info("  dedup_skipped (sibling) : %d",
+                    summary["vw_dedup_skipped"])
+        logger.info("  errors                  : %d", summary["vw_errors"])
+        logger.info("AUTO PED SUMMARY")
+        logger.info("  examined                : %d",
+                    summary["auto_ped_examined"])
+        logger.info("  listed (manual)         : %d",
+                    summary["auto_ped_listed"])
+        logger.info("─" * 60)
+
         write_workbook(output_path, vw_actions, auto_ped_records, summary)
         logger.info("Wrote workbook → %s", output_path)
 
