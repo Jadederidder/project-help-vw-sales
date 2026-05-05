@@ -247,13 +247,45 @@ def main():
         logger.info("%s", line)
     logger.info("─" * 60)
 
+    # ── CS call list: dedupe truly-pending by client_id ────────────────────
+    # The truly_pending list contains one entry per BTC, so a customer
+    # who has 5 pending BTCs (all with no active sub elsewhere) appears
+    # 5 times. CS only needs to call them once. Dedupe by client_id;
+    # keep the first occurrence + tally how many BTCs that client has.
+    deduped_truly_pending = []
+    btc_count_by_client = Counter(r["client_id"] for r in truly_pending)
+    seen_cids = set()
+    for r in truly_pending:
+        cid = r["client_id"]
+        if cid in seen_cids:
+            continue
+        seen_cids.add(cid)
+        deduped_truly_pending.append({
+            **r,
+            "duplicate_btc_count": btc_count_by_client[cid],
+        })
+    logger.info("CS call list: %d truly-pending BTCs → %d unique customers",
+                len(truly_pending), len(deduped_truly_pending))
+
+    # ── Write Excel attachment ─────────────────────────────────────────────
+    output_path = Path("/tmp") / (
+        f"vw_truly_pending_call_list_"
+        f"{datetime.now(timezone.utc).date().isoformat()}.xlsx"
+    )
+    _write_call_list_workbook(output_path, deduped_truly_pending,
+                              n_overlap, n_total)
+    logger.info("Wrote CS call list → %s (%d unique customer(s))",
+                output_path, len(deduped_truly_pending))
+
     # Email to JD
     sender = os.environ.get("EMAIL_SENDER")
     pwd    = os.environ.get("EMAIL_PASSWORD")
     if sender and pwd:
+        import mimetypes
         msg = EmailMessage()
         msg["Subject"] = (f"[Diagnostic] VW pending × active overlap — "
-                          f"{n_overlap}/{n_total} ({pct:.1f}%) already active")
+                          f"{n_overlap}/{n_total} ({pct:.1f}%) already active "
+                          f"· {len(deduped_truly_pending)} unique to call")
         msg["From"]    = sender
         msg["To"]      = JD_RECIPIENT
         msg.set_content(report)
@@ -265,14 +297,81 @@ def main():
             + "</pre></body></html>"
         )
         msg.add_alternative(html, subtype="html")
+        if output_path.exists():
+            ctype, _ = mimetypes.guess_type(str(output_path))
+            if not ctype:
+                ctype = ("application/vnd.openxmlformats-officedocument."
+                         "spreadsheetml.sheet")
+            maintype, subtype = ctype.split("/", 1)
+            with open(output_path, "rb") as f:
+                msg.add_attachment(f.read(), maintype=maintype,
+                                   subtype=subtype, filename=output_path.name)
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
             smtp.login(sender, pwd)
             smtp.send_message(msg)
-        logger.info("Email sent → %s", JD_RECIPIENT)
+        logger.info("Email sent → %s (with CS call-list attached)",
+                    JD_RECIPIENT)
     else:
         logger.warning("EMAIL_SENDER / EMAIL_PASSWORD not set — skipping email")
 
     logger.info("Done in %.1fs", time.monotonic() - started)
+
+
+def _write_call_list_workbook(path, deduped_records, n_overlap, n_total):
+    """Single-sheet Excel: the deduped CS call list. Bold/frozen
+    header. POPIA: contains personal details (phone, name,
+    personal_code) — handle per Project Help policy. Headline
+    overlap counts go on the first row above the data so JD has
+    immediate context when opening the file."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "CS Call List"
+
+    bold  = Font(bold=True)
+    title = Font(bold=True, size=12)
+
+    ws["A1"] = (f"VW pending → CS call list. Overlap analysis showed "
+                f"{n_overlap} of {n_total} VW pending records are "
+                f"already active elsewhere — those are EXCLUDED from "
+                f"this list. Below: the deduped truly-pending pile.")
+    ws["A1"].font = title
+    ws.merge_cells("A1:H1")
+
+    headers = ["Pending Template", "Client ID", "Personal Code",
+               "Full Name", "Phone (Normalised)",
+               "Duplicate BTC Count",
+               "Active Elsewhere?", "Notes"]
+    for ci, h in enumerate(headers, 1):
+        c = ws.cell(row=3, column=ci, value=h)
+        c.font = bold
+    ws.freeze_panes = "A4"
+
+    for ri, r in enumerate(deduped_records, 4):
+        row_values = [
+            r["pending_template"],
+            r["client_id"],
+            r["personal_code"],
+            r["full_name"],
+            r["phone"],
+            r["duplicate_btc_count"],
+            "No" if not r["active_templates"] else "; ".join(r["active_templates"]),
+            ("This customer has multiple stuck pending BTCs — "
+             "all dupes; one call resolves them all"
+             if r["duplicate_btc_count"] > 1 else ""),
+        ]
+        for ci, v in enumerate(row_values, 1):
+            ws.cell(row=ri, column=ci, value="" if v is None else v)
+
+    # Column widths
+    widths = [30, 40, 22, 28, 16, 8, 22, 50]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    wb.save(path)
 
 
 if __name__ == "__main__":
