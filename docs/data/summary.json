@@ -1,10 +1,10 @@
 {
-  "lastUpdated": "2026-05-04T20:07:02Z",
+  "lastUpdated": "2026-05-05T09:30:46Z",
   "kpis": {
-    "netPolicies": 1728,
-    "revenue": 157642,
-    "churnPct": 9.3,
-    "rejectionPct": 3.7
+    "netPolicies": 1724,
+    "revenue": 157286,
+    "churnPct": 9.4,
+    "rejectionPct": 3.8
   },
   "months": [
     {
@@ -112,19 +112,19 @@
     {
       "month": "Feb 2026",
       "gross": 198,
-      "cancel": 23,
+      "cancel": 24,
       "reject": 1,
-      "net": 174,
-      "netInd": 170,
+      "net": 173,
+      "netInd": 169,
       "netFam": 4,
-      "cumNet": 1396,
-      "indRev": 15130,
+      "cumNet": 1395,
+      "indRev": 15041,
       "famRev": 636,
-      "totalRevCum": 127954,
+      "totalRevCum": 127865,
       "collected": 111972,
-      "vwInvoice": 26444.72,
+      "vwInvoice": 26426.32,
       "vwLock": null,
-      "rev": 15766
+      "rev": 15677
     },
     {
       "month": "Mar 2026",
@@ -134,12 +134,12 @@
       "net": 158,
       "netInd": 158,
       "netFam": 0,
-      "cumNet": 1554,
+      "cumNet": 1553,
       "indRev": 14062,
       "famRev": 0,
-      "totalRevCum": 142016,
+      "totalRevCum": 141927,
       "collected": 125818,
-      "vwInvoice": 29351.34,
+      "vwInvoice": 29332.94,
       "vwLock": null,
       "rev": 14062
     },
@@ -147,18 +147,18 @@
       "month": "Apr 2026",
       "gross": 180,
       "cancel": 5,
-      "reject": 4,
-      "net": 171,
-      "netInd": 170,
+      "reject": 7,
+      "net": 168,
+      "netInd": 167,
       "netFam": 1,
-      "cumNet": 1725,
-      "indRev": 15130,
+      "cumNet": 1721,
+      "indRev": 14863,
       "famRev": 159,
-      "totalRevCum": 157305,
+      "totalRevCum": 156949,
       "collected": null,
-      "vwInvoice": 32511.51,
+      "vwInvoice": 32437.92,
       "vwLock": null,
-      "rev": 15289
+      "rev": 15022
     },
     {
       "month": "May 2026",
@@ -168,12 +168,12 @@
       "net": 3,
       "netInd": 2,
       "netFam": 1,
-      "cumNet": 1728,
+      "cumNet": 1724,
       "indRev": 178,
       "famRev": 159,
-      "totalRevCum": 157642,
+      "totalRevCum": 157286,
       "collected": null,
-      "vwInvoice": 32581.1,
+      "vwInvoice": 32507.52,
       "vwLock": null,
       "rev": 337
     }
