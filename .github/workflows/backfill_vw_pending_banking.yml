@@ -1,0 +1,55 @@
+name: Revio — Backfill VW Pending Banking (one-off)
+
+# Manual-trigger only. PATCHes /clients/{id}/ on the underlying
+# Client of every VW pending BTC whose banking is broken AND whose
+# SALES tab has a healthy replacement. Auto Pedigree pending records
+# are emitted as a CSV for JD's manual upload (no auto-fix path —
+# Auto Ped banking source lives in a local OneDrive folder the
+# runner can't reach).
+#
+# DRY_RUN defaults to "true" so a stray click previews instead of
+# patching live customer data.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — list VW patches that would be sent, no API writes, email JD only"
+        required: false
+        default: "true"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    name: Backfill VW pending banking
+    runs-on: ubuntu-latest
+    # Pessimistic estimate: ~118 VW + 87 Auto Ped pending = ~205
+    # Client GETs (some shared via cache) + ~118 PATCHes in production.
+    # 30 min is generous for a workload this size.
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backfill
+        env:
+          REVIO_API_KEY:              ${{ secrets.REVIO_API_KEY }}
+          REVIO_BRAND_ID:             ${{ secrets.REVIO_BRAND_ID }}
+          GOOGLE_SHEETS_CREDENTIALS:  ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:               ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:             ${{ secrets.EMAIL_PASSWORD }}
+          DRY_RUN:                    ${{ github.event.inputs.dry_run }}
+        run: python scripts/backfill_vw_pending_banking.py
