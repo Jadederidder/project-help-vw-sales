@@ -299,31 +299,67 @@ def _mask_pii(value, head=4, tail=4):
     return f"{s[:head]}…{s[-tail:]}"
 
 
-def _days_since(iso_str, today):
-    """ISO-ish date string → integer days since today, or "" if blank /
-    unparseable. Tolerant of trailing 'Z' and time component."""
-    s = (iso_str or "").strip()
+def _to_date(value):
+    """Coerce a Revio date-ish value to a `date`, or None.
+
+    Handles three concrete shapes the BTC + Client endpoints emit
+    interchangeably:
+      - ISO string ("2025-09-19", "2025-09-19T10:30:00",
+        "2025-09-19T10:30:00Z") → parsed
+      - int / float Unix epoch in SECONDS (e.g. 1700000000) → parsed
+      - int Unix epoch in MILLISECONDS (e.g. 1700000000000) → parsed
+        (heuristic: any int > 10**10 is treated as ms — anything that
+        big in seconds would be year ~2286, so on this side of the
+        millennium it's safe to assume ms timestamps)
+
+    The first dry-run (run #25355866865) crashed here because BTC
+    `created_on` came back as an int on at least some rows; the
+    string-only contract was wrong.
+
+    Returns None on blank / unparseable so callers can decide how to
+    surface "" vs a default date.
+    """
+    if value is None or value == "":
+        return None
+    # bool is a subclass of int — exclude it before the numeric branch.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        ts = float(value)
+        if ts > 10**10:
+            ts = ts / 1000.0
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).date()
+        except (OverflowError, OSError, ValueError):
+            return None
+    s = str(value).strip()
     if not s:
-        return ""
+        return None
     try:
-        # Accept "2025-09-19", "2025-09-19T10:30:00", "2025-09-19T10:30:00Z"
-        d = datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
     except ValueError:
+        return None
+
+
+def _days_since(value, today):
+    """Days between `value` (any shape `_to_date` accepts) and `today`,
+    or "" if blank / unparseable. Returned as int so Excel renders it
+    right-aligned numeric."""
+    d = _to_date(value)
+    if d is None:
         return ""
     return (today - d).days
 
 
-def _iso_date_only(iso_str):
-    """Strip time/tz from an ISO date so the Excel cell is a clean date.
-    Returns "" for blank/unparseable inputs."""
-    s = (iso_str or "").strip()
-    if not s:
+def _iso_date_only(value):
+    """Strip time/tz from a Revio date-ish value so the Excel cell is a
+    clean YYYY-MM-DD string. Returns "" for blank inputs and the raw
+    string repr for non-blank inputs that can't be parsed (better
+    partial info than silently dropped data)."""
+    d = _to_date(value)
+    if d is not None:
+        return d.isoformat()
+    if value in (None, ""):
         return ""
-    try:
-        d = datetime.fromisoformat(s.replace("Z", "+00:00")).date()
-    except ValueError:
-        return s  # fall back to raw — better partial info than dropped data
-    return d.isoformat()
+    return str(value)  # unparseable but non-empty — preserve for debugging
 
 
 # ─── Revio reads (Client fetch + caching) ────────────────────────────────────

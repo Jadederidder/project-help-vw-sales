@@ -30,12 +30,17 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "scripts"))
 
+from datetime import date, datetime, timezone  # noqa: E402
+
 from dump_non_active_revio_subscribers import (  # noqa: E402
     BUCKET_INACTIVE,
     BUCKET_PAUSED,
     BUCKET_PENDING,
     BUCKET_SKIP_ACTIVE,
     BUCKET_SKIP_UNKNOWN,
+    _days_since,
+    _iso_date_only,
+    _to_date,
     annotate_with_active_elsewhere,
     build_active_phone_index,
     build_summary_sheet_data,
@@ -269,6 +274,73 @@ class BuildSummarySheetData(unittest.TestCase):
         self.assertEqual(s["active_elsewhere_total"], 0)
         self.assertEqual(s["active_elsewhere_by_status"],
                          {"Paused": 0, "Pending": 0, "Inactive": 0})
+
+
+# ─── (e) date helpers — Revio mixed-shape regression coverage ────────────────
+class DateHelpers(unittest.TestCase):
+    """Pinned by run #25355866865 which crashed because BTC `created_on`
+    came back as an int (Unix epoch in seconds), not a string. The
+    helpers must accept ISO strings, int seconds, AND int milliseconds
+    interchangeably — Revio mixes them across endpoints."""
+
+    def test_to_date_iso_string(self):
+        self.assertEqual(_to_date("2025-09-19"), date(2025, 9, 19))
+
+    def test_to_date_iso_string_with_time_and_z(self):
+        self.assertEqual(_to_date("2025-09-19T10:30:00Z"), date(2025, 9, 19))
+
+    def test_to_date_int_epoch_seconds(self):
+        """Revio returns BTC `created_on` as int seconds on at least
+        some rows. 1700000000 → 2023-11-14 UTC."""
+        ts = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(_to_date(ts), date(2023, 11, 14))
+
+    def test_to_date_int_epoch_milliseconds(self):
+        """Some endpoints return ms timestamps. The ts > 10**10
+        threshold catches them — anything that big in seconds would be
+        year ~2286."""
+        ms = int(datetime(2024, 6, 15, tzinfo=timezone.utc).timestamp() * 1000)
+        self.assertEqual(_to_date(ms), date(2024, 6, 15))
+
+    def test_to_date_blank_inputs(self):
+        self.assertIsNone(_to_date(""))
+        self.assertIsNone(_to_date(None))
+
+    def test_to_date_unparseable_string_returns_none(self):
+        self.assertIsNone(_to_date("not a date"))
+
+    def test_to_date_bool_is_not_treated_as_int(self):
+        """Defensive: bool subclasses int in Python. _to_date must NOT
+        try to fromtimestamp(True) or it'll silently return 1970-01-01."""
+        self.assertIsNone(_to_date(True))
+        self.assertIsNone(_to_date(False))
+
+    def test_iso_date_only_int_epoch(self):
+        ts = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(_iso_date_only(ts), "2023-11-14")
+
+    def test_iso_date_only_blank_returns_empty_string(self):
+        self.assertEqual(_iso_date_only(None), "")
+        self.assertEqual(_iso_date_only(""), "")
+
+    def test_iso_date_only_unparseable_string_preserved(self):
+        """Non-empty but unparseable inputs come back as-is — better
+        partial info in the cell than silently dropped data."""
+        self.assertEqual(_iso_date_only("garbage"), "garbage")
+
+    def test_days_since_int_epoch(self):
+        ts = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(_days_since(ts, date(2023, 11, 20)), 6)
+
+    def test_days_since_iso_string(self):
+        self.assertEqual(_days_since("2023-11-14", date(2023, 11, 20)), 6)
+
+    def test_days_since_blank_returns_empty_string(self):
+        """Blank input → "" (not 0) so the Excel cell renders blank, not
+        a misleading numeric. Excel's right-align logic also gates on
+        isinstance(int)."""
+        self.assertEqual(_days_since(None, date(2023, 11, 20)), "")
+        self.assertEqual(_days_since("", date(2023, 11, 20)), "")
 
 
 if __name__ == "__main__":
