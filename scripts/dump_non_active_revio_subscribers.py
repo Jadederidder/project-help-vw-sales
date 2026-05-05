@@ -299,30 +299,127 @@ def _mask_pii(value, head=4, tail=4):
     return f"{s[:head]}…{s[-tail:]}"
 
 
-def _days_since(iso_str, today):
-    """ISO-ish date string → integer days since today, or "" if blank /
-    unparseable. Tolerant of trailing 'Z' and time component."""
-    s = (iso_str or "").strip()
-    if not s:
-        return ""
+# Numeric-input split per master doc §4.5: Revio (and a number of the
+# upstream sources that feed it) interleave THREE shapes for date fields
+# across endpoints. The string contract was wrong on the first dry-run
+# (run #25355866865) — BTC `created_on` arrived as int.
+#
+#   • value < 1                 → reject ("" / None). Negative or zero
+#                                 are never valid Excel serials nor
+#                                 plausible Unix epochs, so don't let
+#                                 fromtimestamp(-1) silently emit
+#                                 1969-12-31 cells.
+#   • 1 ≤ value < 100_000       → Excel serial (1899-12-30 epoch via
+#                                 openpyxl.utils.datetime.from_excel).
+#                                 100_000 days = year ~2173 → ample
+#                                 headroom for any business date.
+#   • value ≥ 100_000           → Unix epoch in SECONDS. 100_000 sec
+#                                 is 1970-01-02 — anything ≥ that is
+#                                 treated as epoch, not Excel serial.
+#                                 (The previous heuristic also handled
+#                                 ms-epoch but master doc §4.5 doesn't
+#                                 document that case for Revio, so we
+#                                 don't speculate.)
+EXCEL_SERIAL_MAX = 100_000
+
+def _to_date(value):
+    """Coerce any of Revio's documented date-ish shapes to a `date`,
+    or None. Belt-and-braces: wraps everything in try/except so an
+    unexpected shape (dict, list, custom object, etc.) NEVER crashes
+    the dump — logged + None returned instead.
+
+    Documented input shapes:
+      - None / ""                    → None
+      - ISO string ("2025-09-19",
+        "2025-09-19T10:30:00Z",
+        "  2025-09-19  ")            → parsed (ws-tolerant)
+      - int / float Excel serial
+        (1 ≤ v < 100_000)            → parsed (1899-12-30 epoch)
+      - int / float Unix epoch sec
+        (v ≥ 100_000)                → parsed
+      - anything else / unparseable  → None (warning logged with raw)
+    """
+    if value is None or value == "":
+        return None
     try:
-        # Accept "2025-09-19", "2025-09-19T10:30:00", "2025-09-19T10:30:00Z"
-        d = datetime.fromisoformat(s.replace("Z", "+00:00")).date()
-    except ValueError:
+        # bool subclasses int — exclude it before the numeric branch or
+        # True would silently coerce to 1899-12-31.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            n = float(value)
+            if n < 1:
+                logger.debug(
+                    "Revio returned non-positive date value: type=%s "
+                    "value=%r → rejected as unparseable",
+                    type(value).__name__, value,
+                )
+                return None
+            if n < EXCEL_SERIAL_MAX:
+                from openpyxl.utils.datetime import from_excel
+                d = from_excel(n).date()
+                logger.debug(
+                    "Revio returned non-string date value: type=%s "
+                    "value=%r → coerced to %r (Excel serial)",
+                    type(value).__name__, value, d.isoformat(),
+                )
+                return d
+            d = datetime.fromtimestamp(n, tz=timezone.utc).date()
+            logger.debug(
+                "Revio returned non-string date value: type=%s "
+                "value=%r → coerced to %r (Unix epoch sec)",
+                type(value).__name__, value, d.isoformat(),
+            )
+            return d
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+        # dict / list / object / etc — never crash, just refuse.
+        logger.warning(
+            "Revio date field had unexpected type: type=%s value=%r — "
+            "treating as blank",
+            type(value).__name__, value,
+        )
+        return None
+    except Exception as e:
+        # Last-ditch safety net. Anything that escapes the typed branches
+        # above (bad fromisoformat, fromtimestamp OverflowError on a 50-
+        # digit int, openpyxl raising on a malformed serial, etc.) lands
+        # here. Log + return None so the dump row still emits with the
+        # date columns blank rather than aborting the whole 5K-row run.
+        logger.warning(
+            "Failed to parse Revio date value: type=%s value=%r error=%s",
+            type(value).__name__, value, e,
+        )
+        return None
+
+
+def _days_since(value, today):
+    """Days between `value` (any shape `_to_date` accepts) and `today`,
+    or "" if blank / unparseable. Returned as int so Excel renders it
+    right-aligned numeric."""
+    d = _to_date(value)
+    if d is None:
         return ""
     return (today - d).days
 
 
-def _iso_date_only(iso_str):
-    """Strip time/tz from an ISO date so the Excel cell is a clean date.
-    Returns "" for blank/unparseable inputs."""
-    s = (iso_str or "").strip()
-    if not s:
-        return ""
+def _iso_date_only(value):
+    """Coerce any Revio date-ish value to a clean "YYYY-MM-DD" string,
+    or "" if blank / unparseable. Public API: same name + same return
+    type as the original — callers (Excel writer, audit row) are
+    untouched.
+
+    Try/except wrap is defence-in-depth on top of `_to_date`'s own
+    safety net — unexpected input MUST NOT crash the run."""
     try:
-        d = datetime.fromisoformat(s.replace("Z", "+00:00")).date()
-    except ValueError:
-        return s  # fall back to raw — better partial info than dropped data
+        d = _to_date(value)
+    except Exception as e:  # belt-and-braces; _to_date already wraps
+        logger.warning("_iso_date_only failed unexpectedly on %r: %s",
+                       value, e)
+        return ""
+    if d is None:
+        return ""
     return d.isoformat()
 
 

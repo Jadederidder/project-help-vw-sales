@@ -30,12 +30,17 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "scripts"))
 
+from datetime import date, datetime, timezone  # noqa: E402
+
 from dump_non_active_revio_subscribers import (  # noqa: E402
     BUCKET_INACTIVE,
     BUCKET_PAUSED,
     BUCKET_PENDING,
     BUCKET_SKIP_ACTIVE,
     BUCKET_SKIP_UNKNOWN,
+    _days_since,
+    _iso_date_only,
+    _to_date,
     annotate_with_active_elsewhere,
     build_active_phone_index,
     build_summary_sheet_data,
@@ -269,6 +274,125 @@ class BuildSummarySheetData(unittest.TestCase):
         self.assertEqual(s["active_elsewhere_total"], 0)
         self.assertEqual(s["active_elsewhere_by_status"],
                          {"Paused": 0, "Pending": 0, "Inactive": 0})
+
+
+# ─── (e) _iso_date_only — full input-shape matrix per master doc §4.5 ────────
+class IsoDateOnly(unittest.TestCase):
+    """Pinned by run #25355866865 which crashed when Revio returned an
+    int for BTC `created_on`. Per master doc §4.5, Revio (and upstream
+    sources) interleave THREE shapes — ISO string, Excel serial (int),
+    Unix epoch seconds (int) — across endpoints. The helper must
+    accept all three plus blanks and refuse anything else without
+    crashing.
+
+    The 12-case matrix is exactly what the bug-fix spec called for.
+    Two cases use the openpyxl-actual output for the Excel serial
+    (2023-07-16, not 2023-08-12 as a back-of-envelope calc suggested)
+    — the contract under test is "value coerces to a date", not the
+    specific date arithmetic, so aligning with the canonical from_excel
+    output is correct.
+    """
+
+    def test_a_none_returns_empty_string(self):
+        self.assertEqual(_iso_date_only(None), "")
+
+    def test_b_empty_string_returns_empty_string(self):
+        self.assertEqual(_iso_date_only(""), "")
+
+    def test_c_iso_date_string(self):
+        self.assertEqual(_iso_date_only("2026-05-04"), "2026-05-04")
+
+    def test_d_iso_datetime_with_z_suffix(self):
+        self.assertEqual(_iso_date_only("2026-05-04T08:30:00Z"),
+                         "2026-05-04")
+
+    def test_e_iso_string_with_surrounding_whitespace(self):
+        self.assertEqual(_iso_date_only("  2026-05-04  "), "2026-05-04")
+
+    def test_f_excel_serial_int(self):
+        """Excel serial 45123 → 2023-07-16 per openpyxl's from_excel
+        with the WINDOWS_EPOCH (1899-12-30) anchor. The bug-fix spec
+        listed 2023-08-12 from a back-of-envelope calc; the canonical
+        openpyxl value is what the production code returns and what
+        end-users see, so the test pins that."""
+        self.assertEqual(_iso_date_only(45123), "2023-07-16")
+
+    def test_g_excel_serial_float_with_time_component(self):
+        """Excel serials with a fractional component (time-of-day) must
+        coerce to the same date as the integer portion."""
+        self.assertEqual(_iso_date_only(45123.5), "2023-07-16")
+
+    def test_h_unix_timestamp_int(self):
+        """1714867200 = 2024-05-05 UTC. Anything ≥ 100_000 is treated
+        as Unix epoch seconds, not Excel serial."""
+        self.assertEqual(_iso_date_only(1714867200), "2024-05-05")
+
+    def test_i_unix_timestamp_float(self):
+        self.assertEqual(_iso_date_only(1714867200.0), "2024-05-05")
+
+    def test_j_garbage_string_returns_empty_does_not_crash(self):
+        self.assertEqual(_iso_date_only("garbage"), "")
+
+    def test_k_dict_input_returns_empty_does_not_crash(self):
+        """Defence-in-depth — Revio shouldn't ever send a dict for a
+        date field, but the helper must refuse rather than crash."""
+        self.assertEqual(_iso_date_only({"weird": "dict"}), "")
+
+    def test_l_negative_int_returns_empty_does_not_crash(self):
+        """value < 1 is rejected explicitly so fromtimestamp(-1) never
+        silently emits 1969-12-31 cells. Also covers value == 0."""
+        self.assertEqual(_iso_date_only(-1), "")
+        self.assertEqual(_iso_date_only(0), "")
+
+
+# ─── (f) sibling helpers: _to_date + _days_since — same coercion rules ───────
+class ToDateAndDaysSince(unittest.TestCase):
+    """`_iso_date_only` delegates parsing to `_to_date`; `_days_since`
+    does likewise. These tests pin the shared coercion contract on the
+    sibling helpers so a future refactor that splits the parsing path
+    can't drift one helper without breaking the others."""
+
+    def test_to_date_excel_serial(self):
+        self.assertEqual(_to_date(45123), date(2023, 7, 16))
+
+    def test_to_date_unix_epoch(self):
+        self.assertEqual(_to_date(1714867200), date(2024, 5, 5))
+
+    def test_to_date_iso_string(self):
+        self.assertEqual(_to_date("2025-09-19"), date(2025, 9, 19))
+
+    def test_to_date_bool_is_not_treated_as_int(self):
+        """Defensive: bool subclasses int. _to_date must NOT call
+        from_excel(True) → that returns a real date and would taint
+        any record where Revio sent True/False where it should have
+        sent a date."""
+        self.assertIsNone(_to_date(True))
+        self.assertIsNone(_to_date(False))
+
+    def test_to_date_blank_and_unparseable(self):
+        self.assertIsNone(_to_date(None))
+        self.assertIsNone(_to_date(""))
+        self.assertIsNone(_to_date("not a date"))
+        self.assertIsNone(_to_date(-5))
+        self.assertIsNone(_to_date({"k": "v"}))
+
+    def test_days_since_iso_string(self):
+        self.assertEqual(_days_since("2023-11-14", date(2023, 11, 20)), 6)
+
+    def test_days_since_unix_epoch(self):
+        ts = int(datetime(2023, 11, 14, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(_days_since(ts, date(2023, 11, 20)), 6)
+
+    def test_days_since_excel_serial(self):
+        # 45123 = 2023-07-16, so days to 2023-07-20 = 4.
+        self.assertEqual(_days_since(45123, date(2023, 7, 20)), 4)
+
+    def test_days_since_blank_returns_empty_string(self):
+        """Blank input → "" (not 0) so the Excel cell renders blank,
+        not a misleading numeric. The right-align style also gates on
+        isinstance(int) so "" stays unstyled."""
+        self.assertEqual(_days_since(None, date(2023, 11, 20)), "")
+        self.assertEqual(_days_since("", date(2023, 11, 20)), "")
 
 
 if __name__ == "__main__":
