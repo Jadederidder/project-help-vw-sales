@@ -299,43 +299,98 @@ def _mask_pii(value, head=4, tail=4):
     return f"{s[:head]}…{s[-tail:]}"
 
 
+# Numeric-input split per master doc §4.5: Revio (and a number of the
+# upstream sources that feed it) interleave THREE shapes for date fields
+# across endpoints. The string contract was wrong on the first dry-run
+# (run #25355866865) — BTC `created_on` arrived as int.
+#
+#   • value < 1                 → reject ("" / None). Negative or zero
+#                                 are never valid Excel serials nor
+#                                 plausible Unix epochs, so don't let
+#                                 fromtimestamp(-1) silently emit
+#                                 1969-12-31 cells.
+#   • 1 ≤ value < 100_000       → Excel serial (1899-12-30 epoch via
+#                                 openpyxl.utils.datetime.from_excel).
+#                                 100_000 days = year ~2173 → ample
+#                                 headroom for any business date.
+#   • value ≥ 100_000           → Unix epoch in SECONDS. 100_000 sec
+#                                 is 1970-01-02 — anything ≥ that is
+#                                 treated as epoch, not Excel serial.
+#                                 (The previous heuristic also handled
+#                                 ms-epoch but master doc §4.5 doesn't
+#                                 document that case for Revio, so we
+#                                 don't speculate.)
+EXCEL_SERIAL_MAX = 100_000
+
 def _to_date(value):
-    """Coerce a Revio date-ish value to a `date`, or None.
+    """Coerce any of Revio's documented date-ish shapes to a `date`,
+    or None. Belt-and-braces: wraps everything in try/except so an
+    unexpected shape (dict, list, custom object, etc.) NEVER crashes
+    the dump — logged + None returned instead.
 
-    Handles three concrete shapes the BTC + Client endpoints emit
-    interchangeably:
-      - ISO string ("2025-09-19", "2025-09-19T10:30:00",
-        "2025-09-19T10:30:00Z") → parsed
-      - int / float Unix epoch in SECONDS (e.g. 1700000000) → parsed
-      - int Unix epoch in MILLISECONDS (e.g. 1700000000000) → parsed
-        (heuristic: any int > 10**10 is treated as ms — anything that
-        big in seconds would be year ~2286, so on this side of the
-        millennium it's safe to assume ms timestamps)
-
-    The first dry-run (run #25355866865) crashed here because BTC
-    `created_on` came back as an int on at least some rows; the
-    string-only contract was wrong.
-
-    Returns None on blank / unparseable so callers can decide how to
-    surface "" vs a default date.
+    Documented input shapes:
+      - None / ""                    → None
+      - ISO string ("2025-09-19",
+        "2025-09-19T10:30:00Z",
+        "  2025-09-19  ")            → parsed (ws-tolerant)
+      - int / float Excel serial
+        (1 ≤ v < 100_000)            → parsed (1899-12-30 epoch)
+      - int / float Unix epoch sec
+        (v ≥ 100_000)                → parsed
+      - anything else / unparseable  → None (warning logged with raw)
     """
     if value is None or value == "":
         return None
-    # bool is a subclass of int — exclude it before the numeric branch.
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        ts = float(value)
-        if ts > 10**10:
-            ts = ts / 1000.0
-        try:
-            return datetime.fromtimestamp(ts, tz=timezone.utc).date()
-        except (OverflowError, OSError, ValueError):
-            return None
-    s = str(value).strip()
-    if not s:
-        return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
-    except ValueError:
+        # bool subclasses int — exclude it before the numeric branch or
+        # True would silently coerce to 1899-12-31.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            n = float(value)
+            if n < 1:
+                logger.debug(
+                    "Revio returned non-positive date value: type=%s "
+                    "value=%r → rejected as unparseable",
+                    type(value).__name__, value,
+                )
+                return None
+            if n < EXCEL_SERIAL_MAX:
+                from openpyxl.utils.datetime import from_excel
+                d = from_excel(n).date()
+                logger.debug(
+                    "Revio returned non-string date value: type=%s "
+                    "value=%r → coerced to %r (Excel serial)",
+                    type(value).__name__, value, d.isoformat(),
+                )
+                return d
+            d = datetime.fromtimestamp(n, tz=timezone.utc).date()
+            logger.debug(
+                "Revio returned non-string date value: type=%s "
+                "value=%r → coerced to %r (Unix epoch sec)",
+                type(value).__name__, value, d.isoformat(),
+            )
+            return d
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+        # dict / list / object / etc — never crash, just refuse.
+        logger.warning(
+            "Revio date field had unexpected type: type=%s value=%r — "
+            "treating as blank",
+            type(value).__name__, value,
+        )
+        return None
+    except Exception as e:
+        # Last-ditch safety net. Anything that escapes the typed branches
+        # above (bad fromisoformat, fromtimestamp OverflowError on a 50-
+        # digit int, openpyxl raising on a malformed serial, etc.) lands
+        # here. Log + return None so the dump row still emits with the
+        # date columns blank rather than aborting the whole 5K-row run.
+        logger.warning(
+            "Failed to parse Revio date value: type=%s value=%r error=%s",
+            type(value).__name__, value, e,
+        )
         return None
 
 
@@ -350,16 +405,22 @@ def _days_since(value, today):
 
 
 def _iso_date_only(value):
-    """Strip time/tz from a Revio date-ish value so the Excel cell is a
-    clean YYYY-MM-DD string. Returns "" for blank inputs and the raw
-    string repr for non-blank inputs that can't be parsed (better
-    partial info than silently dropped data)."""
-    d = _to_date(value)
-    if d is not None:
-        return d.isoformat()
-    if value in (None, ""):
+    """Coerce any Revio date-ish value to a clean "YYYY-MM-DD" string,
+    or "" if blank / unparseable. Public API: same name + same return
+    type as the original — callers (Excel writer, audit row) are
+    untouched.
+
+    Try/except wrap is defence-in-depth on top of `_to_date`'s own
+    safety net — unexpected input MUST NOT crash the run."""
+    try:
+        d = _to_date(value)
+    except Exception as e:  # belt-and-braces; _to_date already wraps
+        logger.warning("_iso_date_only failed unexpectedly on %r: %s",
+                       value, e)
         return ""
-    return str(value)  # unparseable but non-empty — preserve for debugging
+    if d is None:
+        return ""
+    return d.isoformat()
 
 
 # ─── Revio reads (Client fetch + caching) ────────────────────────────────────
