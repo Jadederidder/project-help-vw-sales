@@ -1,0 +1,94 @@
+name: VW Dashboard Refresh (post-cancel)
+
+# Re-export summary.json + commit + deploy Pages, ~10 min after the
+# `cancel_casi_revio.yml` workflow runs in project-help-collections.
+#
+# Background: cancel_casi_revio used to live in vw-sales and ended its
+# run with export_summary → commit → Pages deploy. Phase 1 of the VW
+# consolidation (2026-05-06) moved the cancel script into collections
+# but stripped its dashboard-refresh tail — the tail belongs with the
+# dashboard, not with the Casi mutation. This workflow restores that
+# tail, decoupled and on its own cron.
+#
+# Timing chain:
+#   02:00 UTC — sync_cancellations.yml      (vw-sales,  IMAP poll)
+#   02:05 UTC — sync_rejections.yml         (vw-sales,  IMAP poll)
+#   02:10 UTC — cancel_casi_revio.yml       (collections, Casi mutation)
+#   02:20 UTC — vw_dashboard_refresh.yml    (vw-sales,  this workflow)
+#
+# 10 min headroom between cancel and refresh handles typical batch
+# runtimes. If cancel exceeds 10 min on an unusually large day, the
+# refresh will lag by one cycle and catch up tomorrow — acceptable
+# for a daily dashboard.
+
+on:
+  schedule:
+    # 04:20 SAST = 02:20 UTC, Mon-Sat. Sundays don't have Wesbank
+    # cancellations, so no fresh data to surface.
+    - cron: "20 2 * * 1-6"
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run — read sheet only, no commit / no Pages deploy"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions:  write
+
+jobs:
+  refresh:
+    name: Refresh VW dashboard data
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Export summary data to JSON
+        timeout-minutes: 5
+        env:
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+          EMAIL_SENDER:              ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:            ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:           ${{ secrets.EMAIL_RECIPIENT }}
+        run: python scripts/export_summary.py
+
+      - name: Commit dashboard data
+        id: commit
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/data/summary.json
+          if git diff --staged --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: refresh dashboard data after Casi cancellations"
+            git push
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger Pages deploy
+        if: steps.commit.outputs.committed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy_pages.yml --ref main
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::error::vw_dashboard_refresh FAILED — check the logs above."
