@@ -1,5 +1,5 @@
 {
-  "last_deployed_at": "2026-05-04T10:25:16Z",
+  "last_deployed_at": "2026-05-06T10:28:24Z",
   "source_workflow": "sync_rejections",
-  "commit_sha": "0f2824d"
+  "commit_sha": "84a6663"
 }
