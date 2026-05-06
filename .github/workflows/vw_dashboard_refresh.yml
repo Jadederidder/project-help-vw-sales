@@ -39,6 +39,22 @@ permissions:
   contents: write
   actions:  write
 
+# Serialize runs of this workflow to prevent the git race condition
+# observed on 2026-05-06: two near-simultaneous clicks of the
+# in-sheet refresh button each rebuilt summary.json with slightly
+# different timestamps, both attempted `git push origin main`, and
+# the second was rejected with "fetch first" because the first had
+# already advanced main between the second job's checkout and its
+# push attempt.
+#
+# `cancel-in-progress: false` queues subsequent fires rather than
+# cancelling them — the queued run will see the in-flight run's
+# commit on its checkout, find no diff, and exit cleanly. No
+# spurious failure emails, no lost work.
+concurrency:
+  group: vw-dashboard-refresh
+  cancel-in-progress: false
+
 jobs:
   refresh:
     name: Refresh VW dashboard data
